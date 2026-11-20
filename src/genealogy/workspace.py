@@ -194,6 +194,7 @@ class SyncReport:
     removed: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     git_initialized: bool = False
+    config_updated: bool = False
 
 
 def _write_config(root: Path, cfg: dict[str, Any]) -> None:
@@ -358,17 +359,68 @@ def init_workspace(
     )
 
 
+def _is_git_repo(root: Path) -> bool:
+    if not shutil.which("git"):
+        return False
+    proc = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def ensure_git_clean(root: Path) -> bool:
+    """Verify that `root` (if it is a git repository) has no uncommitted changes.
+
+    Returns True if `root` is a clean git repository, False if `root` is not a git
+    repository. Raises RuntimeError if `root` has uncommitted changes or `git status` fails.
+    """
+    if not _is_git_repo(root):
+        return False
+
+    proc = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"exit code {proc.returncode}"
+        raise RuntimeError(f"Failed to check git status in {root}: {detail}")
+
+    dirty_lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    if dirty_lines:
+        preview = "\n".join(f"  {line}" for line in dirty_lines[:10])
+        more = f"\n  ... and {len(dirty_lines) - 10} more" if len(dirty_lines) > 10 else ""
+        raise RuntimeError(
+            f"Git workspace has uncommitted changes in {root}:\n"
+            f"{preview}{more}\n"
+            "Commit or stash your changes before running `genealogy upgrade-workspace` "
+            "(or pass `--allow-dirty` to proceed anyway)."
+        )
+    return True
+
+
 def upgrade_workspace(
     root: Path | str,
     *,
     dry_run: bool = False,
     plugin_only: bool | None = None,
+    allow_dirty: bool = False,
 ) -> SyncReport:
     """Upgrade managed AGENTS.md, skills, and hooks in an existing user research repo.
 
     Never modifies data/, artifacts/, notes/, workspace/, README.md, or AGENTS.local.md.
     """
     root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise FileNotFoundError(f"Workspace directory does not exist: {root_path}")
+
+    if not dry_run and not allow_dirty:
+        ensure_git_clean(root_path)
+
     cfg = load_workspace_config(root_path)
 
     if plugin_only is None:
@@ -381,7 +433,12 @@ def upgrade_workspace(
         root_path, dry_run=dry_run, plugin_only=effective_plugin_only
     )
 
-    if not dry_run:
+    config_updated = (
+        cfg.get("toolkit_version") != __version__
+        or cfg.get("agent_mode") != agent_mode
+        or not (root_path / ".genealogy.yaml").exists()
+    )
+    if not dry_run and config_updated:
         cfg["toolkit_version"] = __version__
         cfg["agent_mode"] = agent_mode
         _write_config(root_path, cfg)
@@ -394,4 +451,5 @@ def upgrade_workspace(
         updated=updated,
         removed=removed,
         unchanged=unchanged,
+        config_updated=config_updated,
     )

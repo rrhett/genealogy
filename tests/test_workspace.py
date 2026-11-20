@@ -9,6 +9,8 @@ import threading
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from genealogy import __version__
 from genealogy.cli import main
 from genealogy.intake import scaffold_unlinked_sources, scan_artifacts
@@ -146,3 +148,64 @@ def test_cli_init_and_upgrade_workspace(tmp_path: Path, capsys) -> None:
 
     assert main(["upgrade-workspace", "--root", str(target), "--dry-run"]) == 0
     assert "[DRY RUN]" in capsys.readouterr().out
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+
+
+def test_upgrade_workspace_requires_clean_git_and_prints_commit_commands(
+    tmp_path: Path, capsys
+) -> None:
+    target = tmp_path / "git-family"
+    init_workspace(target, git_init=True)
+    _git(target, "config", "user.email", "test@example.com")
+    _git(target, "config", "user.name", "Test User")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-m", "Initial commit")
+
+    # Dirty workspace: untracked user note + modified stale AGENTS.md
+    (target / "AGENTS.md").write_text("# Outdated AGENTS\n", encoding="utf-8")
+    (target / "notes" / "draft.md").write_text("WIP\n", encoding="utf-8")
+
+    # Fails without --allow-dirty and leaves files untouched
+    with pytest.raises(RuntimeError, match="uncommitted changes"):
+        upgrade_workspace(target)
+    assert (target / "AGENTS.md").read_text(encoding="utf-8") == "# Outdated AGENTS\n"
+
+    assert main(["upgrade-workspace", "--root", str(target)]) == 1
+    err = capsys.readouterr().err
+    assert "uncommitted changes" in err
+
+    # --dry-run still previews on a dirty repo
+    assert main(["upgrade-workspace", "--root", str(target), "--dry-run"]) == 0
+    assert "[DRY RUN]" in capsys.readouterr().out
+
+    # Clean repo: commit the pending changes, then make AGENTS.md stale in a clean commit
+    _git(target, "add", "-A")
+    _git(target, "commit", "-m", "Simulate older AGENTS.md")
+
+    assert main(["upgrade-workspace", "--root", str(target)]) == 0
+    out = capsys.readouterr().out
+    assert "Recommended git commands to review and commit the update:" in out
+    assert "git status" in out
+    assert "git add .genealogy.yaml AGENTS.md .agents/" in out
+    assert f'git commit -m "Upgrade genealogy workspace to toolkit v{__version__}"' in out
+
+
+def test_upgrade_workspace_allow_dirty_flag(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "dirty-allowed"
+    init_workspace(target, git_init=True)
+    _git(target, "config", "user.email", "test@example.com")
+    _git(target, "config", "user.name", "Test User")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-m", "Initial commit")
+
+    (target / "AGENTS.md").write_text("# Outdated AGENTS\n", encoding="utf-8")
+    (target / "notes" / "draft.md").write_text("WIP\n", encoding="utf-8")
+
+    assert main(["upgrade-workspace", "--root", str(target), "--allow-dirty"]) == 0
+    out = capsys.readouterr().out
+    assert "[UPD] AGENTS.md" in out
+    assert "git add .genealogy.yaml AGENTS.md .agents/" in out
+    assert (target / "notes" / "draft.md").read_text(encoding="utf-8") == "WIP\n"

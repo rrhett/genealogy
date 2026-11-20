@@ -787,11 +787,17 @@ def _cmd_upgrade_workspace(args: argparse.Namespace) -> int:
     elif args.embed_agent:
         plugin_override = False
 
-    rep = upgrade_workspace(
-        args.root,
-        dry_run=args.dry_run,
-        plugin_only=plugin_override,
-    )
+    try:
+        rep = upgrade_workspace(
+            args.root,
+            dry_run=args.dry_run,
+            plugin_only=plugin_override,
+            allow_dirty=args.allow_dirty,
+        )
+    except (RuntimeError, FileNotFoundError) as exc:
+        print(f"upgrade-workspace error: {exc}", file=sys.stderr)
+        return 1
+
     prefix = "[DRY RUN] " if args.dry_run else ""
     print(f"{prefix}Upgraded workspace {rep.root} to toolkit v{rep.toolkit_version} (mode={rep.agent_mode})")
     print(
@@ -801,9 +807,22 @@ def _cmd_upgrade_workspace(args: argparse.Namespace) -> int:
     for label, items in (("ADD", rep.added), ("UPD", rep.updated), ("DEL", rep.removed)):
         for item in items:
             print(f"    [{label}] {item}")
-    if not args.dry_run and (rep.added or rep.updated or rep.removed):
+    if not args.dry_run and (rep.added or rep.updated or rep.removed or rep.config_updated):
         print("\nUser files untouched: data/, artifacts/, notes/, workspace/, README.md, AGENTS.local.md.")
-        print("Review with `git status` and commit when ready.")
+        staged_targets: list[str] = []
+        if (rep.root / ".genealogy.yaml").exists():
+            staged_targets.append(".genealogy.yaml")
+        if (rep.root / "AGENTS.md").exists():
+            staged_targets.append("AGENTS.md")
+        if (rep.root / ".agents").exists():
+            staged_targets.append(".agents/")
+        targets_str = " ".join(staged_targets) if staged_targets else "-A"
+        print("\nRecommended git commands to review and commit the update:")
+        if rep.root != Path.cwd().resolve():
+            print(f"  cd {rep.root}")
+        print("  git status")
+        print(f"  git add {targets_str}")
+        print(f'  git commit -m "Upgrade genealogy workspace to toolkit v{rep.toolkit_version}"')
     return 0
 
 
@@ -853,6 +872,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_upg.add_argument("--root", default=".", help="Workspace root directory (default: .)")
     p_upg.add_argument("--dry-run", action="store_true", help="Preview changes without modifying files")
+    p_upg.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow upgrading even if the git workspace has uncommitted changes",
+    )
     mode_grp = p_upg.add_mutually_exclusive_group()
     mode_grp.add_argument("--plugin-only", action="store_true", help="Switch workspace to global plugin mode")
     mode_grp.add_argument("--embed-agent", action="store_true", help="Sync AGENTS.md and .agents/ into workspace")
