@@ -1952,9 +1952,20 @@ function fitToView() {
   const lh = state.data.layout.height || 600;
   const pad = 48;
   const s = Math.min((rect.width - pad) / lw, (rect.height - pad) / lh, 1.15);
-  state.scale = Math.max(0.25, s);
+  state.scale = Math.max(0.04, s);
   state.tx = (rect.width - lw * state.scale) / 2;
   state.ty = Math.max(24, (rect.height - lh * state.scale) / 2);
+  applyTransform();
+}
+
+function centerOnNode(iid) {
+  const pos = state.data.layout.nodes[iid];
+  if (!pos) return;
+  const wrap = document.getElementById("canvas-wrap");
+  const rect = wrap.getBoundingClientRect();
+  state.scale = Math.max(state.scale, 0.85);
+  state.tx = rect.width / 2 - pos.x * state.scale;
+  state.ty = rect.height / 2 - pos.y * state.scale;
   applyTransform();
 }
 
@@ -1983,15 +1994,15 @@ function initPanZoom() {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     const factor = e.deltaY < 0 ? 1.12 : 0.89;
-    const nextScale = Math.min(2.5, Math.max(0.2, state.scale * factor));
+    const nextScale = Math.min(2.5, Math.max(0.04, state.scale * factor));
     state.tx = mx - (mx - state.tx) * (nextScale / state.scale);
     state.ty = my - (my - state.ty) * (nextScale / state.scale);
     state.scale = nextScale;
     applyTransform();
   }, { passive: false });
 
-  document.getElementById("btn-zoom-in").addEventListener("click", () => { state.scale = Math.min(2.5, state.scale * 1.2); applyTransform(); });
-  document.getElementById("btn-zoom-out").addEventListener("click", () => { state.scale = Math.max(0.2, state.scale / 1.2); applyTransform(); });
+  document.getElementById("btn-zoom-in").addEventListener("click", () => { state.scale = Math.min(2.5, state.scale * 1.25); applyTransform(); });
+  document.getElementById("btn-zoom-out").addEventListener("click", () => { state.scale = Math.max(0.04, state.scale / 1.25); applyTransform(); });
   document.getElementById("btn-fit").addEventListener("click", fitToView);
   document.getElementById("btn-clear-sel").addEventListener("click", () => {
     state.selectedId = null; state.selectedHubId = null; state.compareId = null; state.kinshipResult = null;
@@ -2094,9 +2105,20 @@ async function reloadFromServer() {
 function initToolbar() {
   populateTractFilter();
 
-  document.getElementById("search-input").addEventListener("input", (e) => {
+  const searchInput = document.getElementById("search-input");
+  searchInput.addEventListener("input", (e) => {
     state.searchQuery = e.target.value;
     renderGraph();
+  });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const matches = getSearchMatches();
+      if (matches && matches.size > 0) {
+        const firstId = matches.values().next().value;
+        onNodeClick(firstId, false);
+        centerOnNode(firstId);
+      }
+    }
   });
   document.getElementById("focus-mode").addEventListener("change", (e) => {
     state.focusMode = e.target.value;

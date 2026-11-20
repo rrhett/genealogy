@@ -256,12 +256,30 @@ def _cmd_tree(args: argparse.Namespace) -> int:
 
 def _cmd_import_gedcom(args: argparse.Namespace) -> int:
     summary = import_gedcom(args.file, args.root, dest=args.dest)
-    print(f"Imported GEDCOM into {summary.destination}")
+    if summary.warnings:
+        max_show = len(summary.warnings) if args.verbose else 10
+        for w in summary.warnings[:max_show]:
+            print(f"  [WARNING] {w}")
+        if len(summary.warnings) > max_show:
+            rem = len(summary.warnings) - max_show
+            print(f"  ... and {rem} more warning(s) (re-run with --verbose to list all; unparsed dates were preserved in each profile's Notes)")
+        print()
+
+    print(f"Imported GEDCOM into: {summary.destination}")
     print(f"  Compiled source ID: {summary.source_id}")
     print(f"  Individuals:        {summary.individuals_imported} (status=tentative)")
     print(f"  Relationships:      {summary.relationships_imported} (confidence=speculative)")
-    for w in summary.warnings:
-        print(f"  [WARNING] {w}")
+    print(f"  Date warnings:      {len(summary.warnings)}")
+    if args.dest == "staging":
+        try:
+            rel_dest = summary.destination.relative_to(Path(args.root).resolve())
+        except ValueError:
+            rel_dest = summary.destination
+        print("\nNOTE: Files were staged safely outside `data/` (per GPS rules). Next steps:")
+        print(f"  genealogy stats --root {rel_dest}")
+        print(f"  genealogy validate --root {rel_dest}")
+        print(f"  genealogy view --root {rel_dest}")
+        print("  (Or re-run with `--dest data` to import directly into canonical `data/`.)")
     return 0
 
 
@@ -770,6 +788,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("file", help="Path to .ged file")
     p_imp.add_argument("--root", default=".", help="Workspace root directory (default: .)")
     p_imp.add_argument("--dest", choices=["staging", "data"], default="staging", help="Target destination (default: staging)")
+    p_imp.add_argument("--verbose", action="store_true", help="Print every date-parsing warning instead of summarizing")
     p_imp.set_defaults(func=_cmd_import_gedcom)
 
     # export-gedcom

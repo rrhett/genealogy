@@ -16,20 +16,126 @@ from genealogy import __version__
 from genealogy.loader import load_dataset
 from genealogy.schema import parse_genealogy_date, render_frontmatter
 
-_MONTH_MAP = {
-    "JAN": "01",
-    "FEB": "02",
-    "MAR": "03",
-    "APR": "04",
-    "MAY": "05",
-    "JUN": "06",
-    "JUL": "07",
-    "AUG": "08",
-    "SEP": "09",
-    "OCT": "10",
-    "NOV": "11",
-    "DEC": "12",
+# Multilingual month lookup (English, Spanish, French, German, Italian, Portuguese; accent-stripped lowercase)
+_MONTH_MAP: dict[str, str] = {
+    # January
+    "jan": "01",
+    "january": "01",
+    "ene": "01",
+    "enero": "01",
+    "janv": "01",
+    "janvier": "01",
+    "gen": "01",
+    "gennaio": "01",
+    # February
+    "feb": "02",
+    "february": "02",
+    "febr": "02",
+    "febrero": "02",
+    "fev": "02",
+    "fevr": "02",
+    "fevrier": "02",
+    "febbraio": "02",
+    # March
+    "mar": "03",
+    "march": "03",
+    "marzo": "03",
+    "mars": "03",
+    "marz": "03",
+    # April
+    "apr": "04",
+    "april": "04",
+    "abr": "04",
+    "abril": "04",
+    "avr": "04",
+    "avril": "04",
+    "aprile": "04",
+    # May
+    "may": "05",
+    "mayo": "05",
+    "mai": "05",
+    "maio": "05",
+    "maggio": "05",
+    # June
+    "jun": "06",
+    "june": "06",
+    "junio": "06",
+    "juin": "06",
+    "juni": "06",
+    "junho": "06",
+    "giugno": "06",
+    # July
+    "jul": "07",
+    "july": "07",
+    "julio": "07",
+    "juil": "07",
+    "juill": "07",
+    "juillet": "07",
+    "juli": "07",
+    "julho": "07",
+    "luglio": "07",
+    # August
+    "aug": "08",
+    "august": "08",
+    "ago": "08",
+    "agosto": "08",
+    "aout": "08",
+    # September
+    "sep": "09",
+    "sept": "09",
+    "september": "09",
+    "set": "09",
+    "septiembre": "09",
+    "setiembre": "09",
+    "septembre": "09",
+    "settembre": "09",
+    "setembro": "09",
+    # October
+    "oct": "10",
+    "october": "10",
+    "octubre": "10",
+    "octobre": "10",
+    "okt": "10",
+    "oktober": "10",
+    "ottobre": "10",
+    "outubro": "10",
+    # November
+    "nov": "11",
+    "november": "11",
+    "noviembre": "11",
+    "novembre": "11",
+    "novembro": "11",
+    # December
+    "dec": "12",
+    "december": "12",
+    "dic": "12",
+    "diciembre": "12",
+    "decembre": "12",
+    "dez": "12",
+    "dezember": "12",
+    "dezembro": "12",
+    "dicembre": "12",
 }
+
+_QUALIFIER_PREFIXES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"^(?:abt\.?|about|ca\.?|c\.|circa|aprox\.?|aproximadamente|hacia|vers|env\.?|environ)(?:\s+|(?=\d))",
+            re.IGNORECASE,
+        ),
+        "abt",
+    ),
+    (
+        re.compile(r"^(?:bef\.?|before|antes\s+de|antes|avant)(?:\s+|(?=\d))", re.IGNORECASE),
+        "bef",
+    ),
+    (
+        re.compile(r"^(?:aft\.?|after|despues\s+de|despues|apres)(?:\s+|(?=\d))", re.IGNORECASE),
+        "aft",
+    ),
+    (re.compile(r"^(?:est\.?|estimated)(?:\s+|(?=\d))", re.IGNORECASE), "est"),
+    (re.compile(r"^(?:cal\.?|calculated)(?:\s+|(?=\d))", re.IGNORECASE), "cal"),
+]
 
 _LINE_RE = re.compile(r"^\s*(\d+)\s+(?:(@[^@]+@)\s+)?([A-Z0-9_]+)(?:\s(.*))?$")
 
@@ -90,47 +196,109 @@ def parse_gedcom_text(text: str) -> list[GedcomNode]:
     return roots
 
 
+def _fold_ascii(text: str) -> str:
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+
+
+def _validate_iso_date(candidate: str) -> str | None:
+    try:
+        parse_genealogy_date(candidate)
+        return candidate
+    except ValueError:
+        return None
+
+
 def _parse_single_gedcom_date(raw: str) -> str | None:
-    s = raw.strip().upper()
+    s = _fold_ascii(raw).strip().lower()
+    s = re.sub(r"\s+", " ", s)
     if not s:
         return None
-    # DD MON YYYY
-    m = re.fullmatch(r"(\d{1,2})\s+([A-Z]{3})\s+(\d{4})", s)
+
+    # Strip trailing time-of-day if present (e.g., "4/13/2013 11:20:25 am")
+    s = re.sub(r"\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]m)?$", "", s)
+
+    # ISO already: YYYY-MM-DD or YYYY-MM
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})(?:-(\d{1,2}))?", s)
+    if m:
+        y = int(m.group(1))
+        mo = int(m.group(2))
+        if m.group(3):
+            return _validate_iso_date(f"{y:04d}-{mo:02d}-{int(m.group(3)):02d}")
+        return _validate_iso_date(f"{y:04d}-{mo:02d}")
+
+    # DD MON YYYY (e.g. "1 March 1986", "15 Mayo 1930", "12 Aout 1668", "24 Fevr. 1729")
+    m = re.fullmatch(r"(\d{1,2})\s+(?:de\s+)?([a-z]+)\.?\s+(?:de\s+)?(\d{4})", s)
     if m and m.group(2) in _MONTH_MAP:
-        return f"{int(m.group(3)):04d}-{_MONTH_MAP[m.group(2)]}-{int(m.group(1)):02d}"
-    # MON YYYY
-    m = re.fullmatch(r"([A-Z]{3})\s+(\d{4})", s)
+        return _validate_iso_date(f"{int(m.group(3)):04d}-{_MONTH_MAP[m.group(2)]}-{int(m.group(1)):02d}")
+
+    # MON DD, YYYY or MON DD YYYY (e.g. "February 16, 1750", "January 18 1637")
+    m = re.fullmatch(r"([a-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})", s)
     if m and m.group(1) in _MONTH_MAP:
-        return f"{int(m.group(2)):04d}-{_MONTH_MAP[m.group(1)]}"
+        return _validate_iso_date(f"{int(m.group(3)):04d}-{_MONTH_MAP[m.group(1)]}-{int(m.group(2)):02d}")
+
+    # MON YYYY (e.g. "July 1745", "Mayo 1930", "Sept. 1824")
+    m = re.fullmatch(r"([a-z]+)\.?\s+(?:de\s+)?(\d{4})", s)
+    if m and m.group(1) in _MONTH_MAP:
+        return _validate_iso_date(f"{int(m.group(2)):04d}-{_MONTH_MAP[m.group(1)]}")
+
+    # Numeric MM/DD/YYYY or MM-DD-YYYY (with DD/MM fallback if first > 12)
+    m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= a <= 12:
+            res = _validate_iso_date(f"{y:04d}-{a:02d}-{b:02d}")
+            if res:
+                return res
+        if 1 <= b <= 12:
+            res = _validate_iso_date(f"{y:04d}-{b:02d}-{a:02d}")
+            if res:
+                return res
+
     # YYYY
     m = re.fullmatch(r"(\d{4})", s)
     if m:
-        return m.group(1)
+        return _validate_iso_date(m.group(1))
+
     return None
 
 
 def gedcom_date_to_iso(raw: str | None) -> str | None:
-    """Convert a GEDCOM date string to our schema's genealogical date string."""
+    """Convert English, Spanish, or French GEDCOM dates into our schema's genealogical date string."""
     if not raw:
         return None
-    s = raw.strip().upper()
+    s = _fold_ascii(raw).strip()
+    s = re.sub(r"\s+", " ", s)
     if not s:
         return None
 
-    # BET <d1> AND <d2>
-    m_bet = re.fullmatch(r"BET\s+(.+?)\s+AND\s+(.+)", s)
+    # Ranges: BET/BETWEEN <d1> AND <d2>, ENTRE <d1> Y/ET <d2>, FROM <d1> TO <d2>
+    m_bet = re.fullmatch(
+        r"(?:bet\.?|between|entre|from)\s+(.+?)\s+(?:and|y|et|to)\s+(.+)",
+        s,
+        re.IGNORECASE,
+    )
     if m_bet:
         d1 = _parse_single_gedcom_date(m_bet.group(1))
         d2 = _parse_single_gedcom_date(m_bet.group(2))
         if d1 and d2:
-            return f"bet {d1} and {d2}"
+            return _validate_iso_date(f"bet {d1} and {d2}")
         return None
 
-    for qual in ("ABT", "BEF", "AFT", "EST", "CAL"):
-        if s.startswith(qual + " "):
-            inner = _parse_single_gedcom_date(s[len(qual) + 1 :])
+    # Hyphenated year or date-to-year ranges: "1993-2020", "1 Sep 1775-1778"
+    m_yr_rng = re.fullmatch(r"(.+?)\s*-\s*(\d{4})", s)
+    if m_yr_rng and not re.fullmatch(r"\d{1,2}-\d{1,2}", m_yr_rng.group(1)):
+        d1 = _parse_single_gedcom_date(m_yr_rng.group(1))
+        d2 = _parse_single_gedcom_date(m_yr_rng.group(2))
+        if d1 and d2:
+            return _validate_iso_date(f"bet {d1} and {d2}")
+
+    # Multilingual qualifiers: Abt., About, aprox1760, aproximadamente, Before, Bef., Aft., Environ, etc.
+    for pat, qual in _QUALIFIER_PREFIXES:
+        m_q = pat.match(s)
+        if m_q:
+            inner = _parse_single_gedcom_date(s[m_q.end() :])
             if inner:
-                return f"{qual.lower()} {inner}"
+                return _validate_iso_date(f"{qual} {inner}")
             return None
 
     return _parse_single_gedcom_date(s)
@@ -314,13 +482,17 @@ def import_gedcom(
         meta["sex"] = sex
         meta["living"] = False
 
+        unparsed_notes: list[str] = []
+
         birt = n.find_first("BIRT")
         if birt:
             b_date_node = birt.find_first("DATE")
             b_plac_node = birt.find_first("PLAC")
             b_iso = gedcom_date_to_iso(b_date_node.value) if b_date_node else None
             if b_date_node and b_date_node.value.strip() and not b_iso:
-                warnings.append(f"{cid}: could not parse birth date '{b_date_node.value}'")
+                raw_val = b_date_node.value.strip()
+                warnings.append(f"{cid}: could not parse birth date '{raw_val}'")
+                unparsed_notes.append(f"Original unparsed GEDCOM birth date: `{raw_val}`")
             meta["birth"] = {
                 "date": b_iso,
                 "place": b_plac_node.value.strip() if b_plac_node else None,
@@ -333,7 +505,9 @@ def import_gedcom(
             d_plac_node = deat.find_first("PLAC")
             d_iso = gedcom_date_to_iso(d_date_node.value) if d_date_node else None
             if d_date_node and d_date_node.value.strip() and not d_iso:
-                warnings.append(f"{cid}: could not parse death date '{d_date_node.value}'")
+                raw_val = d_date_node.value.strip()
+                warnings.append(f"{cid}: could not parse death date '{raw_val}'")
+                unparsed_notes.append(f"Original unparsed GEDCOM death date: `{raw_val}`")
             meta["death"] = {
                 "date": d_iso,
                 "place": d_plac_node.value.strip() if d_plac_node else None,
@@ -346,6 +520,10 @@ def import_gedcom(
                 ed = ev_node.find_first("DATE")
                 ep = ev_node.find_first("PLAC")
                 ev_iso = gedcom_date_to_iso(ed.value) if ed else None
+                if ed and ed.value.strip() and not ev_iso:
+                    raw_val = ed.value.strip()
+                    warnings.append(f"{cid}: could not parse {ev_type} date '{raw_val}'")
+                    unparsed_notes.append(f"Original unparsed GEDCOM {ev_type} date: `{raw_val}`")
                 events.append(
                     {
                         "type": ev_type,
@@ -372,7 +550,7 @@ def import_gedcom(
 
         meta["status"] = "tentative"
 
-        notes_text = [nt.full_value() for nt in n.find_all("NOTE") if nt.full_value()]
+        notes_text = [nt.full_value() for nt in n.find_all("NOTE") if nt.full_value()] + unparsed_notes
         body_lines = [
             "## Biographical Summary",
             f"Imported from compiled GEDCOM file `{ged_file.name}` (`[{compiled_source_id}]`). Verify against primary records before marking confirmed.",
