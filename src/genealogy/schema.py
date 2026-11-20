@@ -210,13 +210,14 @@ EventType = Literal[
 
 
 class LifeEvent(BaseModel):
-    """Chronological event beyond birth/death (e.g., census residence, military draft)."""
+    """Chronological event beyond birth/death (e.g., census residence, military draft, land)."""
 
     model_config = ConfigDict(extra="forbid")
 
     type: EventType
     date: str | None = None
     place: str | None = None
+    tract: str | None = None
     description: str | None = None
     sources: list[str] = Field(default_factory=list)
 
@@ -251,7 +252,7 @@ class IndividualFrontmatter(BaseModel):
     death: VitalEvent | None = None
     events: list[LifeEvent] = Field(default_factory=list)
     external_ids: dict[str, str] = Field(default_factory=dict)
-    status: Literal["confirmed", "tentative", "hypothetical"] = "tentative"
+    status: Literal["confirmed", "tentative", "hypothetical", "excluded"] = "tentative"
 
     @field_validator("id")
     @classmethod
@@ -290,6 +291,40 @@ RecordType = Literal[
 
 SourceType = Literal["original", "derivative", "authored"]
 InformationType = Literal["primary", "secondary", "mixed", "undetermined"]
+SourceRelevance = Literal["relevant", "pending", "excluded"]
+LinkProvider = Literal[
+    "ancestry",
+    "familysearch",
+    "newspapers",
+    "findagrave",
+    "fold3",
+    "nara",
+    "loc",
+    "wikitree",
+    "state_archive",
+    "personal_collection",
+    "other",
+]
+
+
+class SourceLink(BaseModel):
+    """Online or archival provenance link for a source/artifact (including authenticated links)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: LinkProvider = "other"
+    url: str = Field(min_length=1)
+    accessed: str | None = None
+    requires_auth: bool = False
+    note: str | None = None
+
+    @field_validator("accessed", mode="before")
+    @classmethod
+    def validate_accessed(cls, v: Any) -> str | None:
+        s = _coerce_date_str(v)
+        if s is not None:
+            parse_genealogy_date(s)
+        return s
 
 
 class SourceFrontmatter(BaseModel):
@@ -304,10 +339,14 @@ class SourceFrontmatter(BaseModel):
     jurisdiction: str | None = None
     repository: str | None = None
     url: str | None = None
+    links: list[SourceLink] = Field(default_factory=list)
     artifact_path: str | None = None
     artifact_sha256: str | None = None
     source_type: SourceType | None = None
     information_type: InformationType | None = None
+    relevance: SourceRelevance = "relevant"
+    excluded_for: list[str] = Field(default_factory=list)
+    exclusion_reason: str | None = None
     individuals_cited: list[str] = Field(default_factory=list)
 
     @field_validator("id")
@@ -337,12 +376,12 @@ class SourceFrontmatter(BaseModel):
             raise ValueError("artifact_sha256 must be a 64-character lowercase hex SHA-256 digest")
         return v_clean
 
-    @field_validator("individuals_cited")
+    @field_validator("individuals_cited", "excluded_for")
     @classmethod
-    def validate_individuals_cited(cls, v: list[str]) -> list[str]:
+    def validate_individual_id_lists(cls, v: list[str]) -> list[str]:
         for iid in v:
             if not INDIVIDUAL_ID_RE.match(iid):
-                raise ValueError(f"Invalid individual ID '{iid}' in individuals_cited")
+                raise ValueError(f"Invalid individual ID '{iid}'")
         return v
 
 

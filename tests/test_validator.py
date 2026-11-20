@@ -36,9 +36,9 @@ def _write_rels(root: Path, rels: list[dict]) -> Path:
 
 def test_example_dataset_validates_strictly() -> None:
     report = validate_dataset(EXAMPLE_ROOT)
-    assert report.individuals_count == 6
-    assert report.sources_count == 6
-    assert report.relationships_count == 6
+    assert report.individuals_count == 9
+    assert report.sources_count == 8
+    assert report.relationships_count == 14
     assert report.errors == []
     assert report.warnings == []
     assert report.is_valid(strict=True)
@@ -172,3 +172,30 @@ def test_detects_ancestry_cycle_and_biological_impossibilities(tmp_path: Path) -
     assert "MARRIAGE_AFTER_DEATH" in error_codes
     assert "GPS_CONFIRMED_UNDER_SOURCED" in warn_codes
     assert "GPS_PROVEN_REL_UNDER_SOURCED" in warn_codes
+
+
+def test_excluded_source_guardrails(tmp_path: Path) -> None:
+    _write_src(
+        tmp_path,
+        {
+            "id": "S-1880-CENSUS-WRONG",
+            "title": "Wrong John",
+            "record_type": "census",
+            "relevance": "excluded",
+            "excluded_for": ["I-WEST-JOHN-1858"],
+            # Missing exclusion_reason -> warning
+            "individuals_cited": [],
+        },
+    )
+    _write_ind(
+        tmp_path,
+        {
+            "id": "I-WEST-JOHN-1858",
+            "primary_name": "John West",
+            "birth": {"date": "1858", "sources": ["S-1880-CENSUS-WRONG"]},
+            "status": "tentative",
+        },
+    )
+    report = validate_dataset(tmp_path)
+    assert "EXCLUDED_SOURCE_CITED" in {e.code for e in report.errors}
+    assert "MISSING_EXCLUSION_REASON" in {w.code for w in report.warnings}

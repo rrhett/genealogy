@@ -1,0 +1,7 @@
+[MOCK PRIMARY RECORD EXTRACT — EXCLUDED / MISTAKEN LEAD DEMONSTRATION]
+1880 U.S. Federal Census — Cocke County, Tennessee
+Civil District 9, ED 67, Sheet 12A, Enumerated 14 June 1880
+Dwelling 88, Family 91:
+  Line 21: West, John   | Head | W | M | 24 | M | b. VA | Fa b. VA | Mo b. VA | Blacksmith
+  Line 22: West, Martha | Wife | W | F | 22 | M | b. TN | Fa b. TN | Mo b. TN | Keeping House
+[NOTE: Distinct namesake — born Virginia ca. 1856, blacksmith in District 9, NOT John West (b. Mar 1858 NC, farmer in District 4).]

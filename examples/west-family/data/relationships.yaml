@@ -1,4 +1,78 @@
 relationships:
+  - type: marriage
+    person_1: I-WEST-THOMAS-1830
+    person_2: I-MILLER-SARAH-1834
+    place: "Cocke County, Tennessee, USA"
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "Named as husband and wife granting the 120-acre French Broad River partition deed."
+
+  - type: parent_child
+    person_1: I-WEST-THOMAS-1830
+    person_2: I-WEST-JOHN-1858
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "John West named as son in 1882 partition deed."
+
+  - type: parent_child
+    person_1: I-MILLER-SARAH-1834
+    person_2: I-WEST-JOHN-1858
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "Co-grantor Sarah Miller West named with Thomas West in 1882 deed."
+
+  - type: parent_child
+    person_1: I-WEST-THOMAS-1830
+    person_2: I-WEST-MARY-1860
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "Mary West Rainwater named as daughter in 1882 partition deed."
+
+  - type: parent_child
+    person_1: I-MILLER-SARAH-1834
+    person_2: I-WEST-MARY-1860
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "Co-grantor Sarah Miller West named with Thomas West in 1882 deed."
+
+  - type: marriage
+    person_1: I-RAINWATER-THOMAS-UNKNOWN
+    person_2: I-WEST-MARY-1860
+    place: "Cocke County, Tennessee, USA"
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "Mary West Rainwater named as wife of Thomas Rainwater in 1882 deed."
+
+  - type: parent_child
+    person_1: I-RAINWATER-THOMAS-UNKNOWN
+    person_2: I-RAINWATER-OCTA-1890
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1908-MARRIAGE-WEST-RAINWATER
+      - S-1882-LAND-WEST-FRENCH-BROAD
+    notes: "Thomas Rainwater served as bondsman for Octa's 1908 marriage; corroborated by family land partition."
+
+  - type: parent_child
+    person_1: I-WEST-MARY-1860
+    person_2: I-RAINWATER-OCTA-1890
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1882-LAND-WEST-FRENCH-BROAD
+      - S-1908-MARRIAGE-WEST-RAINWATER
+    notes: "Demonstrates first-cousin marriage reuniting the 1882 French Broad River tract."
+
   - type: parent_child
     person_1: I-WEST-JOHN-1858
     person_2: I-WEST-CLAUDE-1886
@@ -19,7 +93,7 @@ relationships:
       - S-1908-MARRIAGE-WEST-RAINWATER
       - S-1910-CENSUS-WEST-COCKE-TN
       - S-1954-DEATH-WEST-CLAUDE
-    notes: "1908 marriage register corroborated by 1910 census (M1, 2 yrs) and 1954 death certificate."
+    notes: "First-cousin marriage (both grandchildren of Thomas & Sarah West) reuniting the 1882 French Broad River farm tract."
 
   - type: parent_child
     person_1: I-WEST-CLAUDE-1886
@@ -50,10 +124,10 @@ relationships:
 
   - type: fan_associate
     person_1: I-RAINWATER-THOMAS-UNKNOWN
-    person_2: I-RAINWATER-OCTA-1890
+    person_2: I-WEST-CLAUDE-1886
     date: "1908-03-14"
     place: "Cocke County, Tennessee, USA"
     confidence: probable
     sources:
       - S-1908-MARRIAGE-WEST-RAINWATER
-    notes: "Marriage bondsman; candidate father or brother of Octa Rainwater."
+    notes: "Marriage bondsman and uncle/father-in-law for Claude West's 1908 marriage."

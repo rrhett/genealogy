@@ -33,6 +33,7 @@ CREATE TABLE individual_events (
     event_type TEXT NOT NULL,
     event_date TEXT,
     event_place TEXT,
+    tract TEXT,
     description TEXT,
     sources_json TEXT NOT NULL
 );
@@ -45,10 +46,14 @@ CREATE TABLE sources (
     jurisdiction TEXT,
     repository TEXT,
     url TEXT,
+    links_json TEXT NOT NULL,
     artifact_path TEXT,
     artifact_sha256 TEXT,
     source_type TEXT,
     information_type TEXT,
+    relevance TEXT NOT NULL,
+    excluded_for_json TEXT NOT NULL,
+    exclusion_reason TEXT,
     body TEXT NOT NULL
 );
 
@@ -151,10 +156,10 @@ def _populate_connection(conn: sqlite3.Connection, ds: Dataset) -> None:
             conn.execute(
                 """
                 INSERT INTO individual_events (
-                    individual_id, event_type, event_date, event_place, description, sources_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    individual_id, event_type, event_date, event_place, tract, description, sources_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (iid, ev.type, ev.date, ev.place, ev.description, json.dumps(ev.sources)),
+                (iid, ev.type, ev.date, ev.place, ev.tract, ev.description, json.dumps(ev.sources)),
             )
 
         searchable = " ".join(
@@ -164,23 +169,27 @@ def _populate_connection(conn: sqlite3.Connection, ds: Dataset) -> None:
                 " ".join(d.name_variants),
                 d.birth.place if d.birth and d.birth.place else "",
                 d.death.place if d.death and d.death.place else "",
+                " ".join(ev.tract for ev in d.events if ev.tract),
                 ind.body,
             ]
             if part
         )
+        fts_title = f"[EXCLUDED] {d.primary_name}" if d.status == "excluded" else d.primary_name
         conn.execute(
             "INSERT INTO fts_records (entity_type, entity_id, title, content) VALUES (?, ?, ?, ?)",
-            ("individual", iid, d.primary_name, searchable),
+            ("individual", iid, fts_title, searchable),
         )
 
     for sid, src in ds.sources.items():
         s = src.data
+        links_data = [lnk.model_dump() for lnk in s.links]
         conn.execute(
             """
             INSERT INTO sources (
                 id, title, record_type, record_date, jurisdiction, repository,
-                url, artifact_path, artifact_sha256, source_type, information_type, body
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                url, links_json, artifact_path, artifact_sha256, source_type,
+                information_type, relevance, excluded_for_json, exclusion_reason, body
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sid,
@@ -190,10 +199,14 @@ def _populate_connection(conn: sqlite3.Connection, ds: Dataset) -> None:
                 s.jurisdiction,
                 s.repository,
                 s.url,
+                json.dumps(links_data),
                 s.artifact_path,
                 s.artifact_sha256,
                 s.source_type,
                 s.information_type,
+                s.relevance,
+                json.dumps(s.excluded_for),
+                s.exclusion_reason,
                 src.body,
             ),
         )
@@ -204,12 +217,19 @@ def _populate_connection(conn: sqlite3.Connection, ds: Dataset) -> None:
             )
         searchable = " ".join(
             part
-            for part in [s.title, s.jurisdiction or "", s.repository or "", src.body]
+            for part in [
+                s.title,
+                s.jurisdiction or "",
+                s.repository or "",
+                s.exclusion_reason or "",
+                src.body,
+            ]
             if part
         )
+        fts_src_title = f"[EXCLUDED] {s.title}" if s.relevance == "excluded" else s.title
         conn.execute(
             "INSERT INTO fts_records (entity_type, entity_id, title, content) VALUES (?, ?, ?, ?)",
-            ("source", sid, s.title, searchable),
+            ("source", sid, fts_src_title, searchable),
         )
 
     for rel in ds.relationships:

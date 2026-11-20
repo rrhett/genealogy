@@ -40,6 +40,8 @@ def test_export_gedcom_redacts_living_by_default_and_roundtrips(tmp_path: Path) 
     assert "1 NAME Claude /West/" in text
     assert "1 NAME Living /Private/" in text
     assert "Jane /West/" not in text
+    assert "ancestry [auth required]" in text
+    assert "District 9 Blacksmith" not in text  # excluded sources omitted from GEDCOM export
 
     # Opt-in include-living exports unredacted name
     full_ged = tmp_path / "full.ged"
@@ -51,6 +53,6 @@ def test_export_gedcom_redacts_living_by_default_and_roundtrips(tmp_path: Path) 
 
     # Re-importing the exported GEDCOM 7.0 produces a valid staged dataset
     reimported = import_gedcom(redacted_ged, tmp_path, dest="staging")
-    assert reimported.individuals_imported == 6
+    assert reimported.individuals_imported == 9
     val = validate_dataset(reimported.destination)
     assert val.errors == []

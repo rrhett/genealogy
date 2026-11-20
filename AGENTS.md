@@ -72,12 +72,13 @@ events:                          # Optional chronological events beyond birth/de
   - type: residence              # residence | occupation | military | immigration | naturalization | burial | baptism | census | probate | land | education | other
     date: "1910-04-22"
     place: "Civil District 4, Cocke County, Tennessee, USA"
+    tract: ""                    # Optional land parcel / watercourse identifier for land & probate events
     description: "Farmer, head of household"
     sources: ["S-1910-CENSUS-WEST-COCKE-TN"]
 external_ids:                    # Optional links to online trees (leads only)
   familysearch: "LXYZ-123"
   wikitree: "West-12345"
-status: confirmed                # confirmed | tentative | hypothetical
+status: confirmed                # confirmed | tentative | hypothetical | excluded
 ---
 ## Biographical Summary
 Concise synthesis of proven life events with inline source IDs (`[S-...]`).
@@ -97,11 +98,20 @@ record_type: census              # census | vital | church | military | newspape
 date: "1910-04-22"               # Optional; omit or use "undated" if unknown
 jurisdiction: "Civil District 4, Cocke County, Tennessee, USA"
 repository: "National Archives and Records Administration (NARA), T624, roll 1494"
-url: ""                          # Optional permalink / ARK / Chronicling America URL
+url: ""                          # Optional single permalink / ARK URL
+links:                           # Optional structured online provenance links (including login-gated Ancestry/FamilySearch URLs)
+  - provider: ancestry           # ancestry | familysearch | newspapers | findagrave | fold3 | nara | loc | wikitree | state_archive | personal_collection | other
+    url: "https://www.ancestry.com/imageviewer/collections/7884/images/..."
+    accessed: "2026-11-19"
+    requires_auth: true
+    note: "Higher-res scan"
 artifact_path: "artifacts/1910_census_cocke_tn_p4a.png"
 artifact_sha256: ""              # Optional SHA-256 digest from `uv run genealogy intake`
 source_type: original            # original | derivative | authored
 information_type: primary        # primary | secondary | mixed | undetermined
+relevance: relevant              # relevant (default) | pending | excluded (mistaken lead kept for SHA-256 duplicate protection)
+excluded_for: []                 # Individual IDs this record was ruled out for (when relevance: excluded)
+exclusion_reason: ""             # Required rationale when relevance: excluded
 individuals_cited:
   - I-WEST-CLAUDE-1886
   - I-RAINWATER-OCTA-1890
@@ -136,7 +146,7 @@ relationships:
 ## 4. Workflow Rules & Available Tooling
 
 1. **Initial Handoff Ingestion:** When `RESEARCH_HANDOFF.md` is present, parse its confirmed individuals, citations, and open hypotheses into `data/` and `workspace/HYPOTHESES.md`. Once verified by the user, move `RESEARCH_HANDOFF.md` to `workspace/archive/`.
-2. **Processing New Artifacts:** Run `uv run genealogy intake` to inspect unlinked files and SHA-256 checksums. Use the **`artifact-transcription`** skill to transcribe verbatim into `data/sources/`, cross-reference against `data/individuals/` and `notes/`, and log conflicts in `workspace/HYPOTHESES.md` before changing proven facts.
+2. **Processing New Artifacts & Mistaken Leads:** Run `uv run genealogy intake` to inspect unlinked files, SHA-256 checksums, and duplicate-of-excluded alerts. Use the **`artifact-transcription`** skill to transcribe verbatim into `data/sources/` (capturing Ancestry/FamilySearch provenance in `links:`), cross-reference against `data/individuals/` and `notes/`, and log conflicts in `workspace/HYPOTHESES.md` before changing proven facts. **Never delete an artifact that turns out to belong to an unrelated namesake**—keep the scan in `artifacts/` and flag its source record with `relevance: excluded`, `excluded_for`, and `exclusion_reason` so future searches and `intake` SHA-256 checks never re-evaluate the same false lead.
 3. **Graph & Schema Verification:** Whenever you edit `data/`, run `uv run genealogy validate` to verify schema compliance, referential integrity, biological/chronological sanity, DAG acyclicity, artifact hashes, and GPS rules.
 4. **Domain Skills (`.agents/skills/`):** Consult the bundled skills when performing specialized workflows:
    - `artifact-transcription` — Verbatim transcription, census column lookup, *Evidence Explained* citations.
@@ -152,5 +162,9 @@ relationships:
    - `uv run genealogy build-db` / `uv run genealogy query "<text>" --fts` — Compile and search SQLite + FTS5.
    - `uv run genealogy timeline <ID> --include-family` — Generate chronological life timelines.
    - `uv run genealogy tree [<ID>] --format mermaid` — Render family graphs.
+   - `uv run genealogy view [--port 8765] [--out tree.html]` — Launch local interactive DAG viewer (or export standalone HTML) with pedigree-collapse & kinship-path highlighting, annotations, Ancestry/FamilySearch links, and inline artifact preview.
+   - `uv run genealogy kinship <ID1> <ID2>` / `collapse <ID>` — Trace all distinct blood paths, Wright's $r$ / $F$, and pedigree collapse across inosculated families.
+   - `uv run genealogy gaps` — Audit missing U.S. Federal Censuses (1790–1950, excluding 1890), promotion-ready profiles, discrepancies, consanguineous marriages, and excluded leads.
+   - `uv run genealogy report <ID>` — Generate a shareable Markdown Family Group Sheet & Research Dossier.
    - `uv run genealogy import-gedcom <file>` / `export-gedcom <out>` — GEDCOM 5.5.1 / 7.0 pipelines.
    - `uv run genealogy search newspapers|nara|wikitree ...` — Query open archival APIs (always treat WikiTree results as secondary leads).

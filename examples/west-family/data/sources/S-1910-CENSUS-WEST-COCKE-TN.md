@@ -5,6 +5,17 @@ record_type: census
 date: "1910-04-22"
 jurisdiction: "Civil District 4, Cocke County, Tennessee, USA"
 repository: "National Archives and Records Administration (NARA), T624, roll 1494"
+links:
+  - provider: ancestry
+    url: "https://www.ancestry.com/imageviewer/collections/7884/images/4449396_00512"
+    accessed: "2026-11-19"
+    requires_auth: true
+    note: "High-res Ancestry scan; indexed under 'Claude West'"
+  - provider: familysearch
+    url: "https://www.familysearch.org/ark:/61903/1:1:MGXZ-001"
+    accessed: "2026-11-19"
+    requires_auth: true
+    note: "FamilySearch index and linked image"
 artifact_path: "artifacts/1910_census_cocke_tn_ed44_p4a.txt"
 artifact_sha256: "a95aab8f45ca0e445148d51bb36ff0d072becfd9928bb5fba6a5bd3560eda0e3"
 source_type: original

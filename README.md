@@ -28,9 +28,19 @@ uv run genealogy intake --root examples/west-family
 # Search across bios and verbatim transcriptions (SQLite FTS5)
 uv run genealogy query "Cocke County" --fts --root examples/west-family
 
-# Generate a chronological life timeline & Mermaid family graph
+# Generate a chronological life timeline, Family Group Sheet & Mermaid graph
 uv run genealogy timeline I-WEST-CLAUDE-1886 --include-family --root examples/west-family
+uv run genealogy report I-WEST-CLAUDE-1886 --root examples/west-family
 uv run genealogy tree --format mermaid --root examples/west-family
+
+# Analyze inosculation / pedigree collapse & research gaps
+uv run genealogy kinship I-WEST-CLAUDE-1886 I-RAINWATER-OCTA-1890 --root examples/west-family
+uv run genealogy collapse I-WEST-EDGAR-1909 --root examples/west-family
+uv run genealogy gaps --root examples/west-family
+
+# Launch the interactive DAG tree viewer in your browser (or export standalone HTML!)
+uv run genealogy view --root examples/west-family
+uv run genealogy view --root examples/west-family --out build/west-family.html
 
 # Export GEDCOM 7.0 (living individuals are automatically redacted by default!)
 uv run genealogy export-gedcom build/west-family.ged --root examples/west-family
@@ -121,8 +131,13 @@ All staged individuals are tagged `status: tentative` and linked to a compiled G
 | `genealogy stats [--root DIR] [--json]` | Displays dataset counts (individuals by status/living, sources by type, relationships, linked vs. unlinked artifacts). |
 | `genealogy build-db [--root DIR] [--out PATH]` | Compiles `data/` into `build/genealogy.sqlite` with normalized tables and an FTS5 full-text search index over bios and verbatim transcriptions. |
 | `genealogy query "<query>" [--fts] [--root DIR]` | Runs FTS5 full-text search (`--fts`) or read-only SQL `SELECT` queries directly against your Markdown dataset. |
-| `genealogy timeline <ID> [--include-family]` | Generates a chronological Markdown timeline (with estimated ages and optional interleaved family events). |
+| `genealogy timeline <ID> [--include-family]` | Generates a chronological Markdown timeline (with estimated ages, land tracts, and optional interleaved family events). |
 | `genealogy tree [<ID>] [--format mermaid\|dot] [--depth N]` | Renders a Mermaid flowchart or Graphviz DOT graph of your family relationships. |
+| `genealogy view [--port 8765] [--out PATH] [--include-living]` | Launches a local interactive **DAG + Marriage-Hub** web viewer built for inosculated/endogamous families (multi-path kinship inspector, pedigree-collapse badges, Ancestry/FamilySearch links, inline artifact previews, excluded leads, and live reload)—or exports a single offline HTML file via `--out`. |
+| `genealogy kinship <ID1> <ID2> [--json]` | Traces every distinct blood path between two individuals and computes Wright's coefficient of relationship ($r$) and expected offspring inbreeding ($F$). |
+| `genealogy collapse <ID> [--max-gen N] [--json]` | Reports per-generation pedigree collapse, multi-path ancestors (`×2`, `×3`…), and Wright's inbreeding coefficient ($F$). |
+| `genealogy gaps [--json]` | Audits missing U.S. Federal Censuses (1790–1950, skipping 1890), promotion-ready `tentative` profiles, recorded discrepancies, consanguineous marriages, and excluded leads. |
+| `genealogy report <ID> [--out PATH] [--include-living]` | Generates a shareable Markdown Family Group Sheet & Research Dossier with numbered citations, provenance links, excluded leads, and living-person redaction. |
 | `genealogy import-gedcom <file> [--dest staging\|data]` | Imports GEDCOM 5.5.1 or 7.0 into `workspace/staging/` (default) or `data/`, preserving GPS provenance. |
 | `genealogy export-gedcom <out> [--version 7.0\|5.5.1] [--include-living]` | Exports `data/` to GEDCOM 7.0 (default) or 5.5.1. **Living individuals (`living: true`) are automatically redacted by default.** |
 | `genealogy search newspapers "<query>" [--state S] [--start-year Y] [--end-year Y]` | Searches Library of Congress Chronicling America historic U.S. newspapers (1770–1963) via the unified `loc.gov` JSON API (no API key needed). |

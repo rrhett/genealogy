@@ -74,6 +74,8 @@ def build_timeline_markdown(
 
     for ev in ind.events:
         desc = ev.description or ev.type.replace("_", " ").title()
+        if ev.tract:
+            desc = f"{desc} [Tract: {ev.tract}]"
         add_entry(ev.date, ev.type.title(), desc, ev.place, ev.sources)
 
     if ind.death:
@@ -134,13 +136,21 @@ def build_timeline_markdown(
     return "\n".join(lines) + "\n"
 
 
-def _select_subgraph(ds: Dataset, center_id: str | None, depth: int) -> set[str]:
+def _select_subgraph(
+    ds: Dataset, center_id: str | None, depth: int, *, include_excluded: bool = False
+) -> set[str]:
+    eligible = {
+        iid
+        for iid, ind in ds.individuals.items()
+        if include_excluded or ind.data.status != "excluded"
+    }
     if center_id is None:
-        return set(ds.individuals.keys())
+        return eligible
     if center_id not in ds.individuals:
         raise KeyError(f"Individual '{center_id}' not found")
+    eligible.add(center_id)
 
-    adj: dict[str, set[str]] = {iid: set() for iid in ds.individuals}
+    adj: dict[str, set[str]] = {iid: set() for iid in eligible}
     for rel in ds.relationships:
         if rel.person_1 in adj and rel.person_2 in adj:
             adj[rel.person_1].add(rel.person_2)

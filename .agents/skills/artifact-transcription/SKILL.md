@@ -67,10 +67,19 @@ date: "1910-04-22" # YYYY, YYYY-MM, YYYY-MM-DD, qualified date, or "undated"
 jurisdiction: "Civil District 4, Cocke County, Tennessee, USA"
 repository: "National Archives and Records Administration (NARA), T624, roll 1494"
 url: ""
+links:
+  - provider: ancestry # ancestry | familysearch | newspapers | findagrave | fold3 | nara | loc | wikitree | state_archive | personal_collection | other
+    url: "https://www.ancestry.com/imageviewer/collections/7884/images/..."
+    accessed: "2026-11-19"
+    requires_auth: true
+    note: "Online scan provenance (even if login-gated)"
 artifact_path: "artifacts/1910_census_cocke_tn_p4a.png"
 artifact_sha256: "<64-char-lowercase-hex-from-intake>"
 source_type: original
 information_type: undetermined
+relevance: relevant # relevant | pending | excluded
+excluded_for: []
+exclusion_reason: ""
 individuals_cited:
   - I-WEST-CLAUDE-1886
   - I-RAINWATER-OCTA-1890

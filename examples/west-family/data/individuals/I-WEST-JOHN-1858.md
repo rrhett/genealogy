@@ -9,6 +9,12 @@ birth:
   place: "North Carolina, USA"
   sources: ["S-1900-CENSUS-WEST-COCKE-TN", "S-1954-DEATH-WEST-CLAUDE"]
 events:
+  - type: land
+    date: "1882-10-12"
+    place: "Civil District 4, Cocke County, Tennessee, USA"
+    tract: "French Broad River — East 60 acres"
+    description: "Received east 60 acres of parents' French Broad River tract by partition deed"
+    sources: ["S-1882-LAND-WEST-FRENCH-BROAD"]
   - type: residence
     date: "1900-06-14"
     place: "Civil District 4, Cocke County, Tennessee, USA"

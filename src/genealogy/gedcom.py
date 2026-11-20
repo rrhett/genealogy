@@ -478,11 +478,17 @@ def export_gedcom(
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
     ind_xref: dict[str, str] = {}
-    for idx, iid in enumerate(sorted(ds.individuals.keys()), start=1):
+    exportable_inds = sorted(
+        iid for iid, ind in ds.individuals.items() if ind.data.status != "excluded"
+    )
+    for idx, iid in enumerate(exportable_inds, start=1):
         ind_xref[iid] = f"@I{idx}@"
 
     src_xref: dict[str, str] = {}
-    for idx, sid in enumerate(sorted(ds.sources.keys()), start=1):
+    exportable_srcs = sorted(
+        sid for sid, src in ds.sources.items() if src.data.relevance != "excluded"
+    )
+    for idx, sid in enumerate(exportable_srcs, start=1):
         src_xref[sid] = f"@S{idx}@"
 
     # Build FAM records from marriage + parent_child edges
@@ -547,7 +553,7 @@ def export_gedcom(
         "education": "EDUC",
     }
 
-    for iid in sorted(ds.individuals.keys()):
+    for iid in exportable_inds:
         ind = ds.individuals[iid].data
         xref = ind_xref[iid]
         lines.append(f"0 {xref} INDI")
@@ -641,7 +647,7 @@ def export_gedcom(
         for cid in fam["children"]:
             lines.append(f"1 CHIL {ind_xref[cid]}")
 
-    for sid in sorted(ds.sources.keys()):
+    for sid in exportable_srcs:
         src = ds.sources[sid].data
         lines.append(f"0 {src_xref[sid]} SOUR")
         lines.append(f"1 TITL {src.title}")
@@ -649,6 +655,9 @@ def export_gedcom(
             lines.append(f"1 PUBL {src.repository}")
         if src.url:
             lines.append(f"1 NOTE URL: {src.url}")
+        for lnk in src.links:
+            auth_tag = " [auth required]" if lnk.requires_auth else ""
+            lines.append(f"1 NOTE {lnk.provider}{auth_tag}: {lnk.url}")
 
     lines.append("0 TRLR")
     out_file.write_text("\n".join(lines) + "\n", encoding="utf-8")

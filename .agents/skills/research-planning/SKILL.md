@@ -22,8 +22,14 @@ Never plan around a vague goal like "find more about the West family." Anchor ev
 Review what is already known first:
 ```bash
 uv run genealogy stats
+uv run genealogy gaps
 uv run genealogy timeline <INDIVIDUAL_ID> --include-family
 uv run genealogy query "<SURNAME>" --fts
+```
+For heavily intermarried (inosculated) families, also check shared ancestry and pedigree collapse before assuming two branches are unrelated:
+```bash
+uv run genealogy kinship <ID_A> <ID_B>
+uv run genealogy collapse <INDIVIDUAL_ID>
 ```
 Also read `notes/` for family lore, clues, and offline sources the user has already mentioned (read-only—never edit `notes/`).
 

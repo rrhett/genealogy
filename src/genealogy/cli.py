@@ -12,6 +12,12 @@ from typing import Any
 import httpx
 
 from genealogy import __version__
+from genealogy.analysis import (
+    build_family_report_markdown,
+    compute_kinship,
+    compute_pedigree_collapse,
+    compute_research_gaps,
+)
 from genealogy.apis.chronicling_america import search_newspapers
 from genealogy.apis.nara import search_nara
 from genealogy.apis.wikitree import (
@@ -25,6 +31,7 @@ from genealogy.intake import scaffold_unlinked_sources, scan_artifacts
 from genealogy.loader import load_dataset
 from genealogy.timeline import build_timeline_markdown, render_tree
 from genealogy.validator import validate_dataset
+from genealogy.viewer import export_viewer_html, serve_viewer
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -59,6 +66,7 @@ def _cmd_intake(args: argparse.Namespace) -> int:
             "linked_count": len(report.linked),
             "unlinked_count": len(report.unlinked),
             "duplicates": report.duplicates,
+            "excluded_duplicates": report.excluded_duplicates,
             "artifacts": [
                 {
                     "path": a.rel_path,
@@ -66,6 +74,7 @@ def _cmd_intake(args: argparse.Namespace) -> int:
                     "sha256": a.sha256,
                     "linked_sources": a.linked_sources,
                     "hash_mismatches": a.hash_mismatches,
+                    "excluded_matches": a.excluded_matches,
                 }
                 for a in report.artifacts
             ],
@@ -80,7 +89,20 @@ def _cmd_intake(args: argparse.Namespace) -> int:
     for art in report.artifacts:
         status = f"linked -> {', '.join(art.linked_sources)}" if art.linked_sources else "UNLINKED"
         mismatch = f" [HASH MISMATCH: {', '.join(art.hash_mismatches)}]" if art.hash_mismatches else ""
-        print(f"  {art.rel_path}  sha256={art.sha256[:12]}...  ({status}){mismatch}")
+        ex_flag = (
+            f" [DUPLICATE OF EXCLUDED LEAD: {', '.join(m['source_id'] for m in art.excluded_matches)}]"
+            if art.excluded_matches
+            else ""
+        )
+        print(f"  {art.rel_path}  sha256={art.sha256[:12]}...  ({status}){mismatch}{ex_flag}")
+
+    if report.excluded_duplicates:
+        print("WARNING — Artifact matches previously EXCLUDED mistaken lead(s):")
+        for ed in report.excluded_duplicates:
+            print(
+                f"  {ed['artifact']} matches {ed['source_id']} "
+                f"(excluded for: {ed['excluded_for'] or 'n/a'} — {ed['reason']})"
+            )
 
     if report.duplicates:
         print("Duplicate artifacts detected (identical SHA-256):")
@@ -317,6 +339,134 @@ def _cmd_search_wikitree(args: argparse.Namespace) -> int:
     return _print_api_results(items, args.json)
 
 
+def _cmd_kinship(args: argparse.Namespace) -> int:
+    try:
+        rep = compute_kinship(args.root, args.person_a, args.person_b, max_depth=args.max_depth)
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rep.to_dict(), indent=2))
+        return 0
+    print(f"Kinship: {rep.person_a_name} ({rep.person_a}) <-> {rep.person_b_name} ({rep.person_b})")
+    print(f"  Married:                       {'Yes' if rep.are_married else 'No'}")
+    print(f"  Wright's Relationship (r):     {rep.wright_relationship:.5f}")
+    print(f"  Expected Offspring F (phi):    {rep.expected_offspring_inbreeding:.5f}")
+    print(f"  Distinct Blood Paths:          {len(rep.paths)}")
+    for idx, p in enumerate(rep.paths, start=1):
+        chain_a = " -> ".join(p.path_a)
+        chain_b = " <- ".join(reversed(p.path_b[:-1]))
+        full = f"{chain_a} <- {chain_b}" if chain_b else chain_a
+        print(f"  {idx}. {p.label} via {p.common_ancestor_name} ({p.common_ancestor}) [{p.steps_a}↑ / {p.steps_b}↑]")
+        print(f"     {full}")
+    return 0
+
+
+def _cmd_collapse(args: argparse.Namespace) -> int:
+    try:
+        rep = compute_pedigree_collapse(args.root, args.individual_id, max_gen=args.max_gen)
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rep.to_dict(), indent=2))
+        return 0
+    print(f"Pedigree Collapse: {rep.primary_name} ({rep.individual_id})")
+    print(f"  Wright's Inbreeding Coefficient (F): {rep.inbreeding_coefficient:.5f}")
+    if rep.generations:
+        print("  Per-Generation Ancestry Slots:")
+        for g in rep.generations:
+            pct = g.collapse_ratio * 100.0
+            print(
+                f"    Gen {g.generation}: {g.unique_ancestors} unique / "
+                f"{g.filled_slots} filled slots (of {g.theoretical_slots} theoretical) "
+                f"— collapse {pct:.1f}%"
+            )
+    if rep.multi_path_ancestors:
+        print("  Multi-Path (Collapsed) Ancestors:")
+        for mpa in rep.multi_path_ancestors:
+            print(
+                f"    - {mpa.primary_name} ({mpa.individual_id}): "
+                f"×{mpa.path_count} across gen(s) {mpa.generations}"
+            )
+    else:
+        print("  No multi-path (collapsed) ancestors detected within depth limit.")
+    return 0
+
+
+def _cmd_gaps(args: argparse.Namespace) -> int:
+    gaps = compute_research_gaps(args.root)
+    if args.json:
+        print(json.dumps(gaps, indent=2))
+        return 0
+    print(f"Research Gap & Audit Report ({gaps['root']})")
+    print(f"\nMissing U.S. Federal Censuses (1790–1950, excluding 1890): {len(gaps['census_gaps'])} person(s)")
+    for row in gaps["census_gaps"]:
+        miss = ", ".join(str(y) for y in row["missing_censuses"])
+        cov = ", ".join(str(y) for y in row["covered_censuses"]) or "none"
+        print(f"  - {row['primary_name']} ({row['individual_id']}, {row['lifespan']})")
+        print(f"    Covered: {cov} | Missing: {miss}")
+
+    print(f"\nPromotion-Ready Tentative Profiles (>=2 original sources): {len(gaps['promotion_ready'])}")
+    for pr in gaps["promotion_ready"]:
+        print(f"  - {pr['primary_name']} ({pr['individual_id']}): {', '.join(pr['non_compiled_sources'])}")
+
+    print(f"\nRecorded Discrepancies: {len(gaps['discrepancies'])}")
+    for d in gaps["discrepancies"]:
+        print(f"  - {d['primary_name']} ({d['individual_id']}): {d['note']}")
+
+    print(f"\nConsanguineous Marriages Detected: {len(gaps['consanguineous_marriages'])}")
+    for cm in gaps["consanguineous_marriages"]:
+        print(
+            f"  - {cm['person_a_name']} & {cm['person_b_name']}: "
+            f"r={cm['wright_relationship']:.4f} ({cm['path_count']} shared blood path(s))"
+        )
+
+    print(f"\nPending Sources: {len(gaps['pending_sources'])} | Excluded Leads: {len(gaps['excluded_sources'])}")
+    for ex in gaps["excluded_sources"]:
+        print(f"  - [EXCLUDED] {ex['source_id']}: {ex['title']} ({ex['exclusion_reason']})")
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    try:
+        md = build_family_report_markdown(
+            args.root,
+            args.individual_id,
+            redact_living=not args.include_living,
+        )
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.out:
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(md, encoding="utf-8")
+        print(f"Wrote Family Group Sheet to {out_p}")
+    else:
+        print(md, end="")
+    return 0
+
+
+def _cmd_view(args: argparse.Namespace) -> int:
+    if args.out:
+        out = export_viewer_html(
+            args.root,
+            args.out,
+            redact_living=not args.include_living,
+        )
+        print(f"Exported standalone interactive viewer to {out}")
+        return 0
+    serve_viewer(
+        args.root,
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_open,
+        redact_living=not args.include_living,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="genealogy",
@@ -393,6 +543,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp.add_argument("--version", choices=["7.0", "5.5.1"], default="7.0", help="GEDCOM version (default: 7.0)")
     p_exp.add_argument("--include-living", action="store_true", help="Include unredacted living individuals (default: redacted)")
     p_exp.set_defaults(func=_cmd_export_gedcom)
+
+    # kinship
+    p_kin = sub.add_parser("kinship", help="Trace all blood paths, coancestry, and Wright's r between two individuals")
+    p_kin.add_argument("person_a", help="First individual ID")
+    p_kin.add_argument("person_b", help="Second individual ID")
+    p_kin.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_kin.add_argument("--max-depth", type=int, default=10, help="Max upward generations to search (default: 10)")
+    p_kin.add_argument("--json", action="store_true", help="Output JSON")
+    p_kin.set_defaults(func=_cmd_kinship)
+
+    # collapse
+    p_col = sub.add_parser("collapse", help="Analyze pedigree collapse, multi-path ancestors, and Wright's F")
+    p_col.add_argument("individual_id", help="Individual ID")
+    p_col.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_col.add_argument("--max-gen", type=int, default=8, help="Max ancestor generations (default: 8)")
+    p_col.add_argument("--json", action="store_true", help="Output JSON")
+    p_col.set_defaults(func=_cmd_collapse)
+
+    # gaps
+    p_gaps = sub.add_parser("gaps", help="Report missing U.S. Censuses, promotion-ready profiles, discrepancies, and excluded leads")
+    p_gaps.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_gaps.add_argument("--json", action="store_true", help="Output JSON")
+    p_gaps.set_defaults(func=_cmd_gaps)
+
+    # report
+    p_rep = sub.add_parser("report", help="Generate a shareable Markdown Family Group Sheet & Research Dossier")
+    p_rep.add_argument("individual_id", help="Individual ID")
+    p_rep.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_rep.add_argument("--out", default=None, help="Optional output Markdown file path")
+    p_rep.add_argument("--include-living", action="store_true", help="Include unredacted living details (default: redacted)")
+    p_rep.set_defaults(func=_cmd_report)
+
+    # view
+    p_view = sub.add_parser("view", help="Launch local interactive DAG tree viewer or export standalone HTML")
+    p_view.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_view.add_argument("--host", default="127.0.0.1", help="Bind host for live server (default: 127.0.0.1)")
+    p_view.add_argument("--port", type=int, default=8765, help="Port for live server (default: 8765)")
+    p_view.add_argument("--no-open", action="store_true", help="Do not automatically open browser")
+    p_view.add_argument("--out", default=None, help="Export a single self-contained HTML file instead of starting server")
+    p_view.add_argument("--include-living", action="store_true", help="Show unredacted living individuals (default: redacted)")
+    p_view.set_defaults(func=_cmd_view)
 
     # search (open archival APIs)
     p_srch = sub.add_parser("search", help="Query open archival & genealogy APIs")

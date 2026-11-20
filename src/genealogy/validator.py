@@ -125,10 +125,15 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
                     f"Individual '{iid}' references unknown source '{sid}'",
                     ind.path,
                 )
+            elif ds.sources[sid].data.relevance == "excluded" and ind.data.status != "excluded":
+                add_error(
+                    "EXCLUDED_SOURCE_CITED",
+                    f"Individual '{iid}' cites excluded/mistaken-lead source '{sid}'",
+                    ind.path,
+                )
 
-        # Unsourced assertion warning
-        if not all_sids:
-            # Also check if referenced in any relationship or source
+        # Unsourced assertion warning (skip for excluded namesake profiles)
+        if not all_sids and ind.data.status != "excluded":
             add_warning(
                 "UNSOURCED_INDIVIDUAL",
                 f"Individual '{iid}' has no source citations in birth, death, or events",
@@ -220,6 +225,21 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
                     src.path,
                 )
 
+        for iid in src.data.excluded_for:
+            if iid not in ds.individuals:
+                add_error(
+                    "MISSING_INDIVIDUAL_REF",
+                    f"Source '{sid}' excluded_for references unknown individual '{iid}'",
+                    src.path,
+                )
+
+        if src.data.relevance == "excluded" and not (src.data.exclusion_reason or "").strip():
+            add_warning(
+                "MISSING_EXCLUSION_REASON",
+                f"Source '{sid}' is marked relevance='excluded' without an exclusion_reason",
+                src.path,
+            )
+
         if src.data.artifact_path:
             art_file = (ds.root / src.data.artifact_path).resolve()
             if not art_file.exists():
@@ -281,6 +301,15 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
                     f"Relationship #{idx} ({rel.type} {p1}->{p2}) references unknown source '{sid}'",
                     rel_path,
                 )
+            elif ds.sources[sid].data.relevance == "excluded":
+                p1_ex = p1 in ds.individuals and ds.individuals[p1].data.status == "excluded"
+                p2_ex = p2 in ds.individuals and ds.individuals[p2].data.status == "excluded"
+                if not (p1_ex and p2_ex):
+                    add_error(
+                        "EXCLUDED_SOURCE_CITED",
+                        f"Relationship #{idx} ({rel.type} {p1}->{p2}) cites excluded source '{sid}'",
+                        rel_path,
+                    )
 
         # Duplicate edge check (symmetric for non-parent_child)
         edge_key = (
@@ -427,6 +456,8 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
 
     # 6. Cross-check bidirectional source <-> individual references (warning only)
     for sid, src in ds.sources.items():
+        if src.data.relevance == "excluded":
+            continue
         for iid in src.data.individuals_cited:
             if iid not in ds.individuals:
                 continue

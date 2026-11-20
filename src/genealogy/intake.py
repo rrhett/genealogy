@@ -19,6 +19,7 @@ class ArtifactRecord:
     sha256: str
     linked_sources: list[str] = field(default_factory=list)
     hash_mismatches: list[str] = field(default_factory=list)
+    excluded_matches: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -26,6 +27,7 @@ class IntakeReport:
     root: Path
     artifacts: list[ArtifactRecord] = field(default_factory=list)
     duplicates: dict[str, list[str]] = field(default_factory=dict)
+    excluded_duplicates: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def unlinked(self) -> list[ArtifactRecord]:
@@ -99,12 +101,21 @@ def scan_artifacts(root: Path | str) -> IntakeReport:
     ds = load_dataset(root)
     report = IntakeReport(root=ds.root)
 
-    # Index sources by normalized artifact path
+    # Index sources by normalized artifact path and excluded sources by SHA-256
     sources_by_artifact: dict[Path, list[tuple[str, str | None]]] = defaultdict(list)
+    excluded_by_sha: dict[str, list[dict[str, str]]] = defaultdict(list)
     for sid, src in ds.sources.items():
         if src.data.artifact_path:
             art_p = (ds.root / src.data.artifact_path).resolve()
             sources_by_artifact[art_p].append((sid, src.data.artifact_sha256))
+        if src.data.relevance == "excluded" and src.data.artifact_sha256:
+            excluded_by_sha[src.data.artifact_sha256].append(
+                {
+                    "source_id": sid,
+                    "excluded_for": ", ".join(src.data.excluded_for),
+                    "reason": src.data.exclusion_reason or "",
+                }
+            )
 
     by_hash: dict[str, list[str]] = defaultdict(list)
 
@@ -123,6 +134,19 @@ def scan_artifacts(root: Path | str) -> IntakeReport:
                 if expected_sha and expected_sha != sha:
                     mismatches.append(sid)
 
+            ex_matches = [
+                m for m in excluded_by_sha.get(sha, []) if m["source_id"] not in linked
+            ]
+            for m in ex_matches:
+                report.excluded_duplicates.append(
+                    {
+                        "artifact": rel,
+                        "source_id": m["source_id"],
+                        "excluded_for": m["excluded_for"],
+                        "reason": m["reason"],
+                    }
+                )
+
             report.artifacts.append(
                 ArtifactRecord(
                     rel_path=rel,
@@ -130,6 +154,7 @@ def scan_artifacts(root: Path | str) -> IntakeReport:
                     sha256=sha,
                     linked_sources=linked,
                     hash_mismatches=mismatches,
+                    excluded_matches=ex_matches,
                 )
             )
 
@@ -170,11 +195,12 @@ def scaffold_unlinked_sources(
             "date": year_part if year_part.isdigit() else "undated",
             "jurisdiction": "TODO: County, State, Country",
             "repository": "",
-            "url": "",
+            "links": [],
             "artifact_path": art.rel_path,
             "artifact_sha256": art.sha256,
             "source_type": "original",
             "information_type": "undetermined",
+            "relevance": "pending",
             "individuals_cited": [],
         }
         body = (

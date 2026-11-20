@@ -55,6 +55,7 @@ Evaluate these five discriminator categories before deciding to merge or split:
 ### 4. Decide: Merge, Split, or Hold Pending Evidence
 
 - **Hold (`tentative` / `hypothetical`):** If evidence is still ambiguous, do **not** prematurely merge records into one `data/individuals/` file or proliferate speculative duplicates. Keep the open conflict in `workspace/HYPOTHESES.md` and plan targeted tie-breaker searches (see `research-planning` skill).
+- **Flag Ruled-Out / Mistaken-Lead Artifacts (`relevance: excluded`):** When an ingested scan turns out to belong to an unrelated same-name individual, **never delete the file from `artifacts/`**. Keep its source record in `data/sources/` with `relevance: excluded`, `excluded_for: [<TARGET_ID>]`, `exclusion_reason: "<concise disambiguation proof>"`, and `individuals_cited: []`. That preserves the SHA-256 fingerprint so `uv run genealogy intake` immediately warns if the same false lead is downloaded again. If you choose to track an unrelated namesake household separately, mark those profiles `status: excluded` so they stay out of canonical trees and GEDCOM exports.
 - **Merge (Same Person):** Consolidate all sources into one `data/individuals/<ID>.md`, preserve all spelling/middle-initial/age variations in `name_variants` and `## Recorded Discrepancies`, and remove any obsolete duplicate ID references.
 - **Split (Proven Distinct Individuals):**
   - If their birth years differ, their standard deterministic IDs already distinguish them (`I-WEST-JOHN-1856` vs. `I-WEST-JOHN-1858`).
