@@ -18,7 +18,7 @@ You must strictly respect directory ownership (enforced mechanically by lifecycl
 
 1. `artifacts/` (or configured `artifacts_dir` in `.genealogy.yaml` / `GENEALOGY_ARTIFACTS_DIR`) (**READ-ONLY — NEVER MODIFY OR DELETE**)
    - Contains raw primary documents (JPG, PNG, PDF scans of census pages, vital records, obituaries, maps).
-   - You may read these files (via vision/OCR), rename nothing, and never alter them.
+   - You may read these files (via vision/OCR), never alter file contents, and only rename generic/screenshot filenames with user confirmation via `genealogy rename-artifact` before linking/committing.
 2. `notes/` (**HUMAN-OWNED — READ-ONLY UNLESS EXPLICITLY INSTRUCTED**)
    - Contains the user's personal research logs, intuition, family lore, and offline notes.
    - Read this directory for context and leads; **never modify, reorganize, or overwrite files in `notes/`** unless the user explicitly asks you to edit a specific file.

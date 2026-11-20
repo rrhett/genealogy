@@ -30,7 +30,12 @@ from genealogy.apis.wikitree import (
 )
 from genealogy.db import build_sqlite, run_sql_query, search_fts
 from genealogy.gedcom import export_gedcom, import_gedcom
-from genealogy.intake import scaffold_unlinked_sources, scan_artifacts
+from genealogy.intake import (
+    grab_screenshot,
+    rename_artifact,
+    scaffold_unlinked_sources,
+    scan_artifacts,
+)
 from genealogy.loader import load_dataset
 from genealogy.timeline import build_timeline_markdown, render_tree
 from genealogy.urls import add_link_to_source
@@ -131,6 +136,98 @@ def _cmd_intake(args: argparse.Namespace) -> int:
             verb = "Would create" if args.dry_run else "Created"
             for sid, dest in created:
                 print(f"  {verb} {sid} -> {dest}")
+    return 0
+
+
+def _cmd_grab_screenshot(args: argparse.Namespace) -> int:
+    try:
+        res = grab_screenshot(
+            args.root,
+            source=args.source,
+            name=args.name,
+            dry_run=args.dry_run,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError) as exc:
+        print(f"grab-screenshot error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "source_path": str(res.source_path),
+                    "dest_path": str(res.dest_path),
+                    "rel_path": res.rel_path,
+                    "sha256": res.sha256,
+                    "already_exists": res.already_exists,
+                    "existing_rel_path": res.existing_rel_path,
+                    "excluded_matches": res.excluded_matches,
+                    "dry_run": args.dry_run,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if res.already_exists:
+        print(f"Screenshot already present in artifacts/: {res.existing_rel_path}")
+        print(f"  Source: {res.source_path}")
+        print(f"  SHA256: {res.sha256}")
+    else:
+        verb = "Would copy" if args.dry_run else "Copied"
+        print(f"{verb} latest screenshot -> {res.rel_path}")
+        print(f"  From:   {res.source_path}")
+        print(f"  To:     {res.dest_path}")
+        print(f"  SHA256: {res.sha256}")
+
+    if res.excluded_matches:
+        print("WARNING — Screenshot matches previously EXCLUDED mistaken lead(s):")
+        for m in res.excluded_matches:
+            print(
+                f"  {m['source_id']} (excluded for: {m['excluded_for'] or 'n/a'} — {m['reason']})"
+            )
+    return 0
+
+
+def _cmd_rename_artifact(args: argparse.Namespace) -> int:
+    try:
+        res = rename_artifact(
+            args.root,
+            args.old_path,
+            args.new_name,
+            dry_run=args.dry_run,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError) as exc:
+        print(f"rename-artifact error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "old_rel_path": res.old_rel_path,
+                    "new_rel_path": res.new_rel_path,
+                    "old_abs_path": str(res.old_abs_path),
+                    "new_abs_path": str(res.new_abs_path),
+                    "sha256": res.sha256,
+                    "updated_sources": res.updated_sources,
+                    "dry_run": args.dry_run,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if res.old_rel_path == res.new_rel_path:
+        print(f"Artifact already named {res.new_rel_path}")
+        return 0
+
+    verb = "Would rename" if args.dry_run else "Renamed"
+    print(f"{verb} {res.old_rel_path} -> {res.new_rel_path}")
+    print(f"  SHA256: {res.sha256}")
+    if res.updated_sources:
+        sverb = "Would update" if args.dry_run else "Updated"
+        print(f"  {sverb} artifact_path in source(s): {', '.join(res.updated_sources)}")
     return 0
 
 
@@ -782,6 +879,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_in.add_argument("--dry-run", action="store_true", help="Preview scaffolded files without writing")
     p_in.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_in.set_defaults(func=_cmd_intake)
+
+    # grab-screenshot
+    p_grab = sub.add_parser(
+        "grab-screenshot",
+        help="Find the latest OS screenshot and copy it into artifacts/",
+    )
+    p_grab.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_grab.add_argument(
+        "--from",
+        dest="source",
+        default=None,
+        help="Optional screenshot file or directory (auto-detects OS screenshot folders if omitted)",
+    )
+    p_grab.add_argument(
+        "--name",
+        default=None,
+        help="Optional destination filename inside artifacts/ (preserves extension if omitted)",
+    )
+    p_grab.add_argument("--dry-run", action="store_true", help="Preview copy without writing")
+    p_grab.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_grab.set_defaults(func=_cmd_grab_screenshot)
+
+    # rename-artifact
+    p_ren = sub.add_parser(
+        "rename-artifact",
+        help="Safely rename an artifact inside artifacts/ and update any linked sources",
+    )
+    p_ren.add_argument(
+        "old_path",
+        help="Current artifact path or filename (e.g., artifacts/Screenshot_2026.png)",
+    )
+    p_ren.add_argument(
+        "new_name",
+        help="New filename or relative path inside artifacts/ (e.g., 1920_census_west.png)",
+    )
+    p_ren.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_ren.add_argument("--dry-run", action="store_true", help="Preview rename without modifying files")
+    p_ren.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_ren.set_defaults(func=_cmd_rename_artifact)
 
     # add-link
     p_lnk = sub.add_parser("add-link", help="Auto-parse and attach an online provenance URL (Ancestry, FamilySearch, etc.) to a source")

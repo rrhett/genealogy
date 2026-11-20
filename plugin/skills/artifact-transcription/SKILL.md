@@ -13,7 +13,7 @@ description: >-
 Use this runbook whenever ingesting or transcribing scans from `artifacts/` into canonical source files under `data/sources/`.
 
 ## Hard Boundaries
-- **Never modify, rename, move, or delete** any file in `artifacts/` (read-only).
+- **Never modify or delete** any file in `artifacts/` (read-only). Only rename generic/screenshot filenames with explicit user confirmation via `genealogy rename-artifact` before creating the linked source record.
 - **Never silently correct** original spelling, phonetic variants, crossed-out text, or conflicting ages/dates. Record everything verbatim and log discrepancies separately.
 - **Always capture the whole context:** full household, adjoining dwellings/families (FAN Club), marginalia, stamps, signatures, and informants.
 
