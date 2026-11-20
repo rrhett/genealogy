@@ -192,7 +192,7 @@ Bundled workflow skills give you one-command shortcuts for the daily research lo
 ### 2. Adding One or More New Record Scans (`artifacts/`)
 1. **Drop your downloaded scan(s)** (JPG, PNG, PDF—baptism, *Registro Civil* acta, *dispensa matrimonial*, census page, deed, obituary) into `artifacts/`.
    * *Naming tip (optional):* `YYYY_type_surname_place.jpg` (e.g., `1895_bautismo_garcia_lagos.jpg`) makes files easy to browse, and `artifacts/` stays read-only once saved.
-2. **Run `/ingest` in Antigravity** (optionally pasting any Ancestry/FamilySearch URL right after `/ingest`).
+2. **Run `/ingest` in Antigravity**, referencing the filename (e.g., `/ingest 1895_bautismo_garcia_lagos.jpg`) and optionally pasting any Ancestry/FamilySearch URL—including the filename gives the conversation a descriptive title instead of a generic one.
    * *(From the terminal, you can also inspect new scans anytime with `genealogy intake` or attach URLs with `genealogy add-link <SOURCE_ID> "<paste-url>"`.)*
 
 ### 3. When a Scan Turns Out to Be the *Wrong* Person (Mistaken Lead)
