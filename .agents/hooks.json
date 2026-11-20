@@ -1,0 +1,25 @@
+{
+  "protect-boundaries": {
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./hooks/guard_boundaries.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "validate-data-on-stop": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ./hooks/validate_on_stop.py",
+        "timeout": 30
+      }
+    ]
+  }
+}

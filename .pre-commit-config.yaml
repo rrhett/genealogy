@@ -1,0 +1,10 @@
+# Optional git pre-commit hook: run `pre-commit install` to enable.
+repos:
+  - repo: local
+    hooks:
+      - id: genealogy-validate
+        name: Validate genealogy dataset (data/)
+        entry: uv run genealogy validate
+        language: system
+        pass_filenames: false
+        files: ^(data/|artifacts/)

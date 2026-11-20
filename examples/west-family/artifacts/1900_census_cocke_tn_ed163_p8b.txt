@@ -1,0 +1,6 @@
+[MOCK PRIMARY RECORD EXTRACT — FOR STARTER REPO DEMONSTRATION ONLY]
+1900 U.S. Federal Census — Cocke County, Tennessee
+Civil District 4, ED 163, Sheet 8B, Enumerated 14 June 1900
+Dwelling 142, Family 145:
+  Line 61: West, John    | Head | W | M | Mar 1858 | 42 | M (18 yrs) | b. NC | Fa b. NC | Mo b. NC | Farmer
+  Line 62: West, Claude  | Son  | W | M | May 1886 | 14 | S          | b. TN | Fa b. NC | Mo b. TN | Farm Laborer

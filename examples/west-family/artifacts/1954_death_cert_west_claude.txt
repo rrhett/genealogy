@@ -1,0 +1,12 @@
+[MOCK PRIMARY RECORD EXTRACT — FOR STARTER REPO DEMONSTRATION ONLY]
+Tennessee State Department of Public Health — Certificate of Death #54-26114
+Place of Death: Newport, Cocke County, Tennessee
+Date of Death: 12 November 1954
+Full Name: Claude West
+Sex: Male | Race: White | Marital Status: Married (Spouse: Octa Rainwater West)
+Date of Birth: 14 May 1886 | Age: 68 years, 5 months, 29 days
+Birthplace: Cocke County, Tennessee
+Father: John West (b. North Carolina)
+Mother: Unknown
+Informant: Octa West, Newport, TN
+Burial: Union Cemetery, Newport, TN (14 November 1954)

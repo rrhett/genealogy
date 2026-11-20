@@ -1,0 +1,59 @@
+relationships:
+  - type: parent_child
+    person_1: I-WEST-JOHN-1858
+    person_2: I-WEST-CLAUDE-1886
+    subtype: biological
+    confidence: proven
+    sources:
+      - S-1900-CENSUS-WEST-COCKE-TN
+      - S-1954-DEATH-WEST-CLAUDE
+    notes: "Confirmed by 1900 Census household relationship and 1954 Death Certificate father field."
+
+  - type: marriage
+    person_1: I-WEST-CLAUDE-1886
+    person_2: I-RAINWATER-OCTA-1890
+    date: "1908-03-15"
+    place: "Cocke County, Tennessee, USA"
+    confidence: proven
+    sources:
+      - S-1908-MARRIAGE-WEST-RAINWATER
+      - S-1910-CENSUS-WEST-COCKE-TN
+      - S-1954-DEATH-WEST-CLAUDE
+    notes: "1908 marriage register corroborated by 1910 census (M1, 2 yrs) and 1954 death certificate."
+
+  - type: parent_child
+    person_1: I-WEST-CLAUDE-1886
+    person_2: I-WEST-EDGAR-1909
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1910-CENSUS-WEST-COCKE-TN
+    notes: "Enumerated as son (age 11/12) in 1910 census; needs a second independent source to reach proven."
+
+  - type: parent_child
+    person_1: I-RAINWATER-OCTA-1890
+    person_2: I-WEST-EDGAR-1909
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-1910-CENSUS-WEST-COCKE-TN
+    notes: "Enumerated as son in household where Octa reports 1 child born, 1 living."
+
+  - type: parent_child
+    person_1: I-WEST-EDGAR-1909
+    person_2: I-WEST-JANE-1950
+    subtype: biological
+    confidence: probable
+    sources:
+      - S-2025-ORAL-WEST-FAMILY-NOTES
+    notes: "Oral family history."
+
+  - type: fan_associate
+    person_1: I-RAINWATER-THOMAS-UNKNOWN
+    person_2: I-RAINWATER-OCTA-1890
+    date: "1908-03-14"
+    place: "Cocke County, Tennessee, USA"
+    confidence: probable
+    sources:
+      - S-1908-MARRIAGE-WEST-RAINWATER
+    notes: "Marriage bondsman; candidate father or brother of Octa Rainwater."

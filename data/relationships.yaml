@@ -1,0 +1,4 @@
+# Canonical relationship graph edges.
+# See AGENTS.md for full schema documentation.
+# For parent_child relationships: person_1 MUST be the parent, person_2 MUST be the child.
+relationships: []

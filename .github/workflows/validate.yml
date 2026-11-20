@@ -1,0 +1,31 @@
+name: Validate Genealogy Workspace
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Lint code
+        run: uv run ruff check src tests .agents/hooks
+
+      - name: Run unit & integration tests
+        run: uv run pytest
+
+      - name: Validate primary dataset (data/)
+        run: uv run genealogy validate
+
+      - name: Validate worked example (examples/west-family)
+        run: uv run genealogy validate --root examples/west-family --strict

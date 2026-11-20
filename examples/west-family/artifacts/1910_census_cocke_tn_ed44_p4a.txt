@@ -1,0 +1,7 @@
+[MOCK PRIMARY RECORD EXTRACT — FOR STARTER REPO DEMONSTRATION ONLY]
+1910 U.S. Federal Census — Cocke County, Tennessee
+Civil District 4, ED 44, Sheet 4A, Enumerated 22 April 1910
+Dwelling 62, Family 64:
+  Line 14: West, Claude | Head | M | W | 23 | M1 (2 yrs)                  | b. TN | Fa b. NC | Mo b. TN | Farmer
+  Line 15: West, Octa   | Wife | F | W | 20 | M1 (2 yrs, 1 born, 1 living)| b. TN | Fa b. TN | Mo b. TN | None
+  Line 16: West, Edgar  | Son  | M | W | 11/12 | S                        | b. TN | Fa b. TN | Mo b. TN | None
