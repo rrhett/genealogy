@@ -135,14 +135,28 @@ If you prefer loading `plugin/` directly as a native Antigravity plugin (with `g
    Read AGENTS.md and AGENTS.local.md. Run `genealogy intake`, review artifacts/ and notes/, transcribe the primary records into data/sources/ using the artifact-transcription skill, create initial profiles in data/individuals/, validate with `genealogy validate`, and outline next steps in workspace/TODO.md.
    ```
 
-### Option B: Importing an Existing Tree (Ancestry, FamilySearch, Gramps, RootsMagic)
-Because Ancestry has no public API and FamilySearch restricts production API keys for personal scripts, export a GEDCOM (`.ged`) file and stage it safely:
+### Option B: Starting from an Existing GEDCOM Tree (Ancestry, FamilySearch, Gramps, RootsMagic)
+Because Ancestry has no public API and FamilySearch restricts production API keys for personal scripts, exporting a GEDCOM (`.ged`) is the fastest way to bring your existing tree into this repository. Everything imported is automatically tagged `status: tentative` and `confidence: speculative` (linked to a compiled GEDCOM source) so you can verify lines against primary records over time.
 
-```bash
-# Imports into workspace/staging/ as tentative/speculative leads (never pollutes data/ directly)
-genealogy import-gedcom ~/Downloads/my-tree.ged
-```
-Use the bundled **`gedcom-triage`** skill to audit staged records for living-person privacy, duplicates, and impossible dates before promoting verified individuals into `data/`.
+1. **Import your GEDCOM file:**
+   ```bash
+   # Recommended: import into workspace/staging/ first to audit before moving into data/
+   genealogy import-gedcom ~/Downloads/my-tree.ged
+
+   # Or, if you want to seed your entire tree directly into data/ as your starting baseline:
+   genealogy import-gedcom ~/Downloads/my-tree.ged --dest data
+   ```
+   *(If you staged into `workspace/staging/gedcom_<name>/`, you can preview it right away with `genealogy stats --root workspace/staging/gedcom_<name>` or `genealogy view --root workspace/staging/gedcom_<name>`.)*
+
+2. **Open `~/my-family-history` in Antigravity and kick off with a prompt:**
+   * *If you staged into `workspace/staging/` (recommended when triaging a large tree):*
+     ```text
+     Read AGENTS.md and AGENTS.local.md. I imported my existing GEDCOM tree into workspace/staging/gedcom_<name>/. Using the gedcom-triage skill, run `genealogy stats` and `genealogy validate` on the staged folder, audit living individuals (marking anyone born in the last ~110 years with no death date as `living: true`), summarize any chronological or biological errors it found, and help me decide whether to promote the full tree or start with a specific family branch into data/.
+     ```
+   * *If you imported directly with `--dest data`:*
+     ```text
+     Read AGENTS.md and AGENTS.local.md. I seeded data/ from my exported GEDCOM tree (everything is currently tentative/speculative). Run `genealogy validate`, `genealogy stats`, and `genealogy gaps`. Flag any chronological errors, identify anyone who should be marked `living: true`, note any consanguineous marriages detected, and create a prioritized starting research plan in workspace/TODO.md.
+     ```
 
 ### Option C: Migrating an Existing AI Chat Thread
 1. Paste this prompt at the end of your existing genealogy chat to extract a lossless handoff:
@@ -163,6 +177,61 @@ Use the bundled **`gedcom-triage`** skill to audit staged records for living-per
    ```text
    Read AGENTS.md and RESEARCH_HANDOFF.md. Ingest confirmed individuals, sources, and relationships into data/, log open questions in workspace/HYPOTHESES.md, run `genealogy validate`, and list any missing source citations before archiving RESEARCH_HANDOFF.md.
    ```
+
+---
+
+## Everyday Research Workflow (Day-to-Day Cheat Sheet)
+
+### 1. Adding One or More New Record Scans (`artifacts/`)
+1. **Drop your downloaded scan(s)** (JPG, PNG, PDF—baptism, *Registro Civil* acta, *dispensa matrimonial*, census page, deed, obituary) into `artifacts/`.
+   * *Naming tip (optional):* `YYYY_type_surname_place.jpg` (e.g., `1895_bautismo_garcia_lagos.jpg`) makes files easy to browse, and `artifacts/` stays read-only once saved.
+2. **(Optional) Check what's new from the terminal:**
+   ```bash
+   genealogy intake
+   ```
+   *(If you're adding a single scan and want to attach its Ancestry/FamilySearch URL right away, you can also run `genealogy intake --scaffold --url "<paste-url>"` or add links later with `genealogy add-link <SOURCE_ID> "<paste-url>"`.)*
+3. **Ask your AI assistant to ingest & transcribe:**
+   * *For a single scan (with an optional Ancestry/FamilySearch link):*
+     ```text
+     I just added a new scan to artifacts/ (source URL: <paste Ancestry/FamilySearch URL if you have one>). Run `genealogy intake`, transcribe it verbatim using the artifact-transcription skill (including English translation if it's in Spanish/Latin, plus any abuelos, padrinos, or witnesses), create the source file in data/sources/ with its SHA-256 and provenance link, cross-reference and update the matching profiles and relationships in data/, flag any discrepancies without overwriting prior facts, and finish with `genealogy validate`.
+     ```
+   * *For a batch of multiple scans dropped at once:*
+     ```text
+     I dropped several new scans into artifacts/. Run `genealogy intake` to find all unlinked files, verify none are duplicates of previously excluded leads, and transcribe each one verbatim into data/sources/ using the artifact-transcription skill. Cross-reference every person, parent, grandparent, and godparent/witness against data/individuals/ and data/relationships.yaml, log any conflicts or open questions in workspace/HYPOTHESES.md, and run `genealogy validate` when done.
+     ```
+
+### 2. When a Scan Turns Out to Be the *Wrong* Person (Mistaken Lead)
+**Never delete the file from `artifacts/`.** Keeping it lets `genealogy intake` warn you automatically if Ancestry serves up the exact same false hint months later:
+```text
+That scan in artifacts/ turned out to be a different same-name person, not <Individual ID>. Keep the file in artifacts/, mark its data/sources/ record as `relevance: excluded` with `excluded_for: [<Individual ID>]` and a clear `exclusion_reason`, remove any accidental links to our tree, and run `genealogy validate`.
+```
+
+### 3. Exploring Your Tree, Gaps, Intermarriages & Land Tracts
+Run any of these from your terminal (or ask your AI agent to run and interpret them):
+```bash
+genealogy view                                    # Open interactive DAG tree viewer in your browser
+genealogy gaps                                    # Missing censuses, parish/Registro Civil records & discrepancies
+genealogy kinship <ID_A> <ID_B>                   # Trace every blood path & Wright's r between two people
+genealogy collapse <ID>                           # Show pedigree collapse & multi-path ancestors (×2, ×3...)
+genealogy tracts                                  # Chronological chain-of-title per land parcel
+genealogy dna <ID_A> <ID_B> --observed-cm 420     # Endogamy-aware expected vs. observed shared DNA
+genealogy report <ID> --out build/dossier.md      # Printable Family Group Sheet (living people redacted)
+```
+
+Sample research prompt for a brick wall or intermarried branch:
+```text
+Run `genealogy gaps`, `genealogy collapse <ID>`, and `genealogy timeline <ID> --include-family`. Using the research-planning and jurisdiction-history skills, review what primary records are missing (including parish registers, Registro Civil, or diocesan dispensas matrimoniales if consanguineous), check workspace/NEGATIVE_SEARCHES.md so we don't repeat prior searches, and propose the next 5 concrete lookups in workspace/TODO.md.
+```
+
+### 4. Saving Your Progress in Git
+After a research session (and whenever `genealogy validate` passes):
+```bash
+genealogy validate
+git status
+git add -A
+git commit -m "Transcribe 1895 Lagos de Moreno baptism and update Garcia branch"
+git push
+```
 
 ---
 

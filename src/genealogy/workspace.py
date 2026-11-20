@@ -88,13 +88,24 @@ An evidence-based genealogy repository managed with the `genealogy` CLI toolkit.
 
 ## Common Commands
 ```bash
-genealogy intake                 # Check new scans in artifacts/ & compute SHA-256 hashes
-genealogy validate               # Validate schema, links, biology, hashes & GPS rules
-genealogy stats                  # Dataset summary
-genealogy gaps                   # Missing U.S. Censuses (1790-1950), discrepancies & leads
-genealogy view                   # Launch interactive DAG & pedigree-collapse tree viewer
-genealogy report <ID>            # Generate a printable Family Group Sheet
+genealogy intake                        # Check new scans in artifacts/ & compute SHA-256 hashes
+genealogy add-link <SOURCE_ID> "<URL>"  # Attach Ancestry/FamilySearch/archival URL to a source
+genealogy validate                      # Validate schema, links, biology, hashes & GPS rules
+genealogy stats                         # Dataset summary
+genealogy gaps                          # Region-aware missing censuses, parish/civil records & leads
+genealogy view                          # Launch interactive DAG & pedigree-collapse tree viewer
+genealogy kinship <ID_A> <ID_B>         # Trace all blood paths & Wright's r
+genealogy collapse <ID>                 # Inspect pedigree collapse & multi-path ancestors
+genealogy tracts                        # Chronological chain-of-title per land parcel
+genealogy dna <ID_A> <ID_B> --observed-cm <cM>  # Endogamy-aware expected vs. observed shared DNA
+genealogy report <ID>                   # Generate a printable Family Group Sheet
 genealogy export-gedcom build/tree.ged  # Export GEDCOM 7.0 (redacts living people by default)
+```
+
+## Quick Prompt: Ingesting New Scans Dropped in `artifacts/`
+Drop one or more scans into `artifacts/`, then prompt your AI assistant:
+```text
+I added new scan(s) to artifacts/ (optional URL: <paste Ancestry/FamilySearch link>). Run `genealogy intake`, verify none duplicate previously excluded leads, transcribe verbatim into data/sources/ using the artifact-transcription skill (including English translation if in Spanish/Latin), cross-reference against data/individuals/ and data/relationships.yaml, flag discrepancies without overwriting prior facts, and finish with `genealogy validate`.
 ```
 
 ## Pulling Future Toolkit Updates
