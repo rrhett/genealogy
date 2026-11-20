@@ -23,10 +23,10 @@ Use this runbook whenever ingesting or transcribing scans from `artifacts/` into
 Run intake first to identify unlinked files in `artifacts/` and obtain their exact 64-character lowercase SHA-256 digests:
 
 ```bash
-uv run genealogy intake
+genealogy intake
 ```
 
-Optionally use `uv run genealogy intake --scaffold` to generate starter source stubs, then complete them manually. Never guess or fabricate `artifact_sha256`.
+Optionally use `genealogy intake --scaffold` to generate starter source stubs, then complete them manually. Never guess or fabricate `artifact_sha256`.
 
 ### 2. Inspect the Artifact & Identify Record Structure
 Read the image or PDF directly from `artifacts/` (via vision/file reading) and check `notes/` for any existing user context about the scan.
@@ -105,7 +105,7 @@ Include these Markdown body sections:
 Run schema, referential integrity, SHA-256, and GPS checks after every edit to `data/`:
 
 ```bash
-uv run genealogy validate
+genealogy validate
 ```
 
 Resolve all errors (and inspect any `ARTIFACT_HASH_MISMATCH`, `UNLINKED_ARTIFACT`, or `ONE_WAY_SOURCE_LINK` warnings) before finishing.

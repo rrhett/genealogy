@@ -44,8 +44,11 @@ def test_example_dataset_validates_strictly() -> None:
     assert report.is_valid(strict=True)
 
 
-def test_empty_starter_root_validates_cleanly() -> None:
-    report = validate_dataset(REPO_ROOT)
+def test_empty_starter_root_validates_cleanly(tmp_path: Path) -> None:
+    from genealogy.workspace import init_workspace
+
+    init_workspace(tmp_path, git_init=False)
+    report = validate_dataset(tmp_path)
     assert report.errors == []
     assert report.warnings == []
     assert report.is_valid(strict=True)

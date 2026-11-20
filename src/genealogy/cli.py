@@ -32,6 +32,7 @@ from genealogy.loader import load_dataset
 from genealogy.timeline import build_timeline_markdown, render_tree
 from genealogy.validator import validate_dataset
 from genealogy.viewer import export_viewer_html, serve_viewer
+from genealogy.workspace import init_workspace, upgrade_workspace
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -467,6 +468,64 @@ def _cmd_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_init(args: argparse.Namespace) -> int:
+    rep = init_workspace(
+        args.directory,
+        git_init=not args.no_git,
+        use_lfs=args.lfs,
+        artifacts_dir=args.artifacts_dir,
+        plugin_only=args.plugin_only,
+        ci_repo=args.ci_repo,
+    )
+    print(f"Initialized genealogy research repository at: {rep.root}")
+    print(f"  Toolkit version:  {rep.toolkit_version}")
+    print(f"  Agent mode:       {rep.agent_mode}")
+    if rep.added:
+        print(f"  Synced assets:    {len(rep.added)} file(s) (AGENTS.md + .agents/skills + .agents/hooks)")
+    if rep.git_initialized:
+        print("  Git repository:   initialized on branch 'main'")
+    if args.lfs:
+        print("  Git LFS:          .gitattributes added for artifacts/** (run `git lfs install`)")
+    if args.artifacts_dir:
+        print(f"  External scans:   artifacts_dir = {args.artifacts_dir}")
+
+    print("\nNext steps:")
+    print(f"  1. cd {rep.root}")
+    print("  2. git add -A && git commit -m \"Initial genealogy workspace\"")
+    print("  3. Create a PRIVATE GitHub repository and push:")
+    print("     git remote add origin <your-private-repo-url> && git push -u origin main")
+    print("  4. Drop record scans in artifacts/ and notes in notes/, then run:")
+    print("     genealogy intake")
+    return 0
+
+
+def _cmd_upgrade_workspace(args: argparse.Namespace) -> int:
+    plugin_override: bool | None = None
+    if args.plugin_only:
+        plugin_override = True
+    elif args.embed_agent:
+        plugin_override = False
+
+    rep = upgrade_workspace(
+        args.root,
+        dry_run=args.dry_run,
+        plugin_only=plugin_override,
+    )
+    prefix = "[DRY RUN] " if args.dry_run else ""
+    print(f"{prefix}Upgraded workspace {rep.root} to toolkit v{rep.toolkit_version} (mode={rep.agent_mode})")
+    print(
+        f"  Added: {len(rep.added)} | Updated: {len(rep.updated)} | "
+        f"Removed: {len(rep.removed)} | Unchanged: {len(rep.unchanged)}"
+    )
+    for label, items in (("ADD", rep.added), ("UPD", rep.updated), ("DEL", rep.removed)):
+        for item in items:
+            print(f"    [{label}] {item}")
+    if not args.dry_run and (rep.added or rep.updated or rep.removed):
+        print("\nUser files untouched: data/, artifacts/, notes/, workspace/, README.md, AGENTS.local.md.")
+        print("Review with `git status` and commit when ready.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="genealogy",
@@ -475,6 +534,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # init
+    p_init = sub.add_parser(
+        "init",
+        help="Bootstrap a fresh, private family-history git repository (separate from toolkit code)",
+    )
+    p_init.add_argument("directory", nargs="?", default=".", help="Target directory (default: current directory)")
+    p_init.add_argument("--no-git", action="store_true", help="Do not run `git init`")
+    p_init.add_argument("--lfs", action="store_true", help="Add .gitattributes for Git LFS on artifacts/ scans")
+    p_init.add_argument(
+        "--artifacts-dir",
+        default=None,
+        help="Store raw scans outside Git (e.g., ~/Dropbox/FamilyScans) via .genealogy.yaml",
+    )
+    p_init.add_argument(
+        "--plugin-only",
+        action="store_true",
+        help="Skip copying AGENTS.md/.agents/ into the repo (use globally installed Antigravity plugin instead)",
+    )
+    p_init.add_argument(
+        "--ci-repo",
+        default=None,
+        help="Toolkit Git URL to embed in .github/workflows/validate.yml",
+    )
+    p_init.set_defaults(func=_cmd_init)
+
+    # upgrade-workspace
+    p_upg = sub.add_parser(
+        "upgrade-workspace",
+        help="Refresh managed AGENTS.md, skills, and hooks after upgrading the genealogy CLI",
+    )
+    p_upg.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_upg.add_argument("--dry-run", action="store_true", help="Preview changes without modifying files")
+    mode_grp = p_upg.add_mutually_exclusive_group()
+    mode_grp.add_argument("--plugin-only", action="store_true", help="Switch workspace to global plugin mode")
+    mode_grp.add_argument("--embed-agent", action="store_true", help="Sync AGENTS.md and .agents/ into workspace")
+    p_upg.set_defaults(func=_cmd_upgrade_workspace)
 
     # validate
     p_val = sub.add_parser("validate", help="Validate data/ schema, links, biology, hashes, and GPS rules")

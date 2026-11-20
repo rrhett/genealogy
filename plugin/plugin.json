@@ -1,0 +1,6 @@
+{
+  "name": "genealogy-research",
+  "version": "0.2.0",
+  "description": "Evidence-based genealogy research skills, GPS rules, and read-only boundary hooks for local family-history repositories.",
+  "logo": "assets/logo.svg"
+}

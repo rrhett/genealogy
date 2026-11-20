@@ -1,10 +1,14 @@
-# Optional git pre-commit hook: run `pre-commit install` to enable.
+# Optional git pre-commit hooks for toolkit contributors: run `pre-commit install` to enable.
 repos:
   - repo: local
     hooks:
-      - id: genealogy-validate
-        name: Validate genealogy dataset (data/)
-        entry: uv run genealogy validate
+      - id: ruff-check
+        name: Lint Python code (ruff)
+        entry: uv run ruff check src tests plugin/hooks
         language: system
         pass_filenames: false
-        files: ^(data/|artifacts/)
+      - id: validate-example
+        name: Validate worked example dataset
+        entry: uv run genealogy validate --root examples/west-family --strict
+        language: system
+        pass_filenames: false

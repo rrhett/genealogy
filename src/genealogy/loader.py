@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -46,6 +48,7 @@ class Dataset:
     sources: dict[str, LoadedSource] = field(default_factory=dict)
     relationships: list[Relationship] = field(default_factory=list)
     load_errors: list[LoadError] = field(default_factory=list)
+    config: dict[str, Any] = field(default_factory=dict)
 
     @property
     def data_dir(self) -> Path:
@@ -53,7 +56,41 @@ class Dataset:
 
     @property
     def artifacts_dir(self) -> Path:
-        return self.root / "artifacts"
+        env_dir = os.environ.get("GENEALOGY_ARTIFACTS_DIR")
+        if env_dir:
+            p = Path(env_dir).expanduser()
+            return p.resolve() if p.is_absolute() else (self.root / p).resolve()
+        cfg_dir = self.config.get("artifacts_dir")
+        if isinstance(cfg_dir, str) and cfg_dir.strip():
+            p = Path(cfg_dir.strip()).expanduser()
+            return p.resolve() if p.is_absolute() else (self.root / p).resolve()
+        return (self.root / "artifacts").resolve()
+
+    def resolve_artifact_path(self, artifact_path: str) -> Path:
+        """Resolve a logical artifact path (e.g. 'artifacts/foo.png') against artifacts_dir."""
+        norm = artifact_path.replace("\\", "/").lstrip("./")
+        if norm.startswith("artifacts/"):
+            rel = norm[len("artifacts/") :]
+            return (self.artifacts_dir / rel).resolve()
+        p = Path(artifact_path).expanduser()
+        return p.resolve() if p.is_absolute() else (self.root / p).resolve()
+
+    def logical_artifact_path(self, file_path: Path) -> str:
+        """Return canonical logical 'artifacts/<rel>' path for a file inside artifacts_dir."""
+        rel = file_path.resolve().relative_to(self.artifacts_dir)
+        return f"artifacts/{str(rel).replace(os.sep, '/')}"
+
+
+def load_workspace_config(root: Path) -> dict[str, Any]:
+    """Load optional `<root>/.genealogy.yaml` configuration."""
+    cfg_path = root / ".genealogy.yaml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except yaml.YAMLError:
+        return {}
 
 
 def load_dataset(root: Path | str) -> Dataset:
@@ -62,7 +99,7 @@ def load_dataset(root: Path | str) -> Dataset:
     Captures schema/parse errors in `dataset.load_errors` instead of aborting early.
     """
     root_path = Path(root).resolve()
-    ds = Dataset(root=root_path)
+    ds = Dataset(root=root_path, config=load_workspace_config(root_path))
 
     ind_dir = ds.data_dir / "individuals"
     if ind_dir.exists():

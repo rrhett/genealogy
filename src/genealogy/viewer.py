@@ -1821,7 +1821,7 @@ def make_viewer_server(
 ) -> ThreadingHTTPServer:
     """Create a local ThreadingHTTPServer serving the interactive tree viewer & live API."""
     root_path = Path(root).resolve()
-    artifacts_root = (root_path / "artifacts").resolve()
+    artifacts_root = load_dataset(root_path).artifacts_dir
 
     class ViewerHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002

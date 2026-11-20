@@ -15,6 +15,9 @@ def _repo_root(payload: dict) -> Path:
     ws = payload.get("workspacePaths")
     if isinstance(ws, list) and ws:
         return Path(ws[0]).resolve()
+    cwd = payload.get("cwd")
+    if cwd:
+        return Path(str(cwd)).resolve()
     return Path(__file__).resolve().parents[2]
 
 
@@ -29,23 +32,31 @@ def _has_data_records(root: Path) -> bool:
     rel = data_dir / "relationships.yaml"
     if rel.exists():
         text = rel.read_text(encoding="utf-8")
-        # Non-empty if there is at least one list item
         if "\n  -" in text or "\n-" in text:
             return True
     return False
 
 
-def _build_validate_cmd(root: Path) -> tuple[list[str], dict[str, str]]:
+def _build_validate_cmd(root: Path) -> tuple[list[str], dict[str, str]] | None:
     env = os.environ.copy()
+    # 1. Global `genealogy` binary on PATH (installed via `uv tool install`)
+    global_bin = shutil.which("genealogy")
+    if global_bin:
+        return [global_bin, "validate", "--root", str(root)], env
+
+    # 2. Local project or toolkit .venv
     hook_repo_root = Path(__file__).resolve().parents[2]
     for candidate_root in (root, hook_repo_root):
         venv_bin = candidate_root / ".venv" / "bin" / "genealogy"
         if venv_bin.exists():
             return [str(venv_bin), "validate", "--root", str(root)], env
-    if shutil.which("uv"):
-        return ["uv", "run", "--project", str(hook_repo_root), "genealogy", "validate", "--root", str(root)], env
-    env["PYTHONPATH"] = str(hook_repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    return [sys.executable, "-m", "genealogy.cli", "validate", "--root", str(root)], env
+
+    # 3. Dev fallback when running inside toolkit checkout
+    if (hook_repo_root / "src" / "genealogy").exists():
+        env["PYTHONPATH"] = str(hook_repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
+        return [sys.executable, "-m", "genealogy.cli", "validate", "--root", str(root)], env
+
+    return None
 
 
 def evaluate(payload: dict) -> dict[str, str]:
@@ -59,7 +70,10 @@ def evaluate(payload: dict) -> dict[str, str]:
     if not _has_data_records(root):
         return {}
 
-    cmd, env = _build_validate_cmd(root)
+    built = _build_validate_cmd(root)
+    if built is None:
+        return {}
+    cmd, env = built
     try:
         proc = subprocess.run(
             cmd,
@@ -77,7 +91,7 @@ def evaluate(payload: dict) -> dict[str, str]:
         return {
             "decision": "continue",
             "reason": (
-                "Data validation failed (`uv run genealogy validate`). "
+                "Data validation failed (`genealogy validate`). "
                 f"Please resolve these errors before finishing:\n\n{details}"
             ),
         }

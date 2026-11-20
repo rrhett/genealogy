@@ -10,8 +10,9 @@ from pathlib import Path
 from genealogy.schema import read_markdown_frontmatter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GUARD_SCRIPT = REPO_ROOT / ".agents" / "hooks" / "guard_boundaries.py"
-STOP_SCRIPT = REPO_ROOT / ".agents" / "hooks" / "validate_on_stop.py"
+PLUGIN_ROOT = REPO_ROOT / "plugin"
+GUARD_SCRIPT = PLUGIN_ROOT / "hooks" / "guard_boundaries.py"
+STOP_SCRIPT = PLUGIN_ROOT / "hooks" / "validate_on_stop.py"
 
 
 def _run_hook(script: Path, payload: dict) -> dict:
@@ -26,7 +27,13 @@ def _run_hook(script: Path, payload: dict) -> dict:
 
 
 def test_hooks_json_is_valid() -> None:
-    hooks_cfg = json.loads((REPO_ROOT / ".agents" / "hooks.json").read_text(encoding="utf-8"))
+    plugin_manifest = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
+    assert plugin_manifest["name"] == "genealogy-research"
+    assert plugin_manifest["version"]
+    assert (PLUGIN_ROOT / plugin_manifest["logo"]).is_file()
+    assert (PLUGIN_ROOT / "rules" / "AGENTS.md").is_file()
+
+    hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
     assert "protect-boundaries" in hooks_cfg
     assert "validate-data-on-stop" in hooks_cfg
 
@@ -183,7 +190,7 @@ def test_validate_on_stop_hook(tmp_path: Path) -> None:
 
 
 def test_all_skills_have_valid_frontmatter() -> None:
-    skills_dir = REPO_ROOT / ".agents" / "skills"
+    skills_dir = PLUGIN_ROOT / "skills"
     skill_files = sorted(skills_dir.glob("*/SKILL.md"))
     assert len(skill_files) == 6
     for sf in skill_files:

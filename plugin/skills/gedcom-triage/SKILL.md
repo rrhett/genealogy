@@ -16,7 +16,7 @@ Never import an external GEDCOM straight into canonical `data/`. Online trees (A
 Run `import-gedcom` with its default staging destination (do **not** pass `--dest data` unless explicitly instructed for an already-vetted dataset):
 
 ```bash
-uv run genealogy import-gedcom <path/to/export.ged>
+genealogy import-gedcom <path/to/export.ged>
 ```
 
 This creates an isolated staged dataset at:
@@ -31,8 +31,8 @@ What the importer does automatically:
 Because the staged folder mirrors the canonical `data/` layout, run the repository validator directly against it to surface chronological, biological, and structural red flags immediately:
 
 ```bash
-uv run genealogy validate --root workspace/staging/gedcom_<slug>
-uv run genealogy stats --root workspace/staging/gedcom_<slug>
+genealogy validate --root workspace/staging/gedcom_<slug>
+genealogy stats --root workspace/staging/gedcom_<slug>
 ```
 
 Inspect every flagged issue in the staged dataset:
@@ -42,7 +42,7 @@ Inspect every flagged issue in the staged dataset:
 - `EVENT_BEFORE_BIRTH`, `EVENT_AFTER_DEATH`, `ANCESTRY_CYCLE`
 
 ## Step 3: Triage Staged Records Against Existing `data/`
-Build a triage worksheet in `workspace/staging/gedcom_<slug>/TRIAGE.md` (or `workspace/HYPOTHESES.md`) and compare staged entries against existing canonical records (`uv run genealogy build-db` + `uv run genealogy query "<surname>" --fts`).
+Build a triage worksheet in `workspace/staging/gedcom_<slug>/TRIAGE.md` (or `workspace/HYPOTHESES.md`) and compare staged entries against existing canonical records (`genealogy build-db` + `genealogy query "<surname>" --fts`).
 
 Check every staged individual and relationship for five risk classes:
 
@@ -74,9 +74,9 @@ Assign every staged record one of three dispositions in your triage log:
 After promoting any files or relationships into `data/`, always run full validation and rebuild the search index:
 
 ```bash
-uv run genealogy validate
-uv run genealogy build-db
-uv run genealogy stats
+genealogy validate
+genealogy build-db
+genealogy stats
 ```
 
 Verify zero errors, zero unredacted living-with-death conflicts, and zero GPS warnings (`GPS_COMPILED_ONLY`, `GPS_PROVEN_REL_COMPILED_ONLY`).

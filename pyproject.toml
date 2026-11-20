@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "genealogy-workspace"
-version = "0.1.0"
-description = "Evidence-based, AI-assisted genealogy research toolkit, validator, and pipelines"
+version = "0.2.0"
+description = "Evidence-based, AI-assisted genealogy research toolkit, validator, interactive viewer, and plugin"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,6 +25,9 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/genealogy"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"plugin" = "genealogy/_bundled_plugin"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

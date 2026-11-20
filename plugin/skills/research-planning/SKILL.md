@@ -21,15 +21,15 @@ Never plan around a vague goal like "find more about the West family." Anchor ev
 
 Review what is already known first:
 ```bash
-uv run genealogy stats
-uv run genealogy gaps
-uv run genealogy timeline <INDIVIDUAL_ID> --include-family
-uv run genealogy query "<SURNAME>" --fts
+genealogy stats
+genealogy gaps
+genealogy timeline <INDIVIDUAL_ID> --include-family
+genealogy query "<SURNAME>" --fts
 ```
 For heavily intermarried (inosculated) families, also check shared ancestry and pedigree collapse before assuming two branches are unrelated:
 ```bash
-uv run genealogy kinship <ID_A> <ID_B>
-uv run genealogy collapse <INDIVIDUAL_ID>
+genealogy kinship <ID_A> <ID_B>
+genealogy collapse <INDIVIDUAL_ID>
 ```
 Also read `notes/` for family lore, clues, and offline sources the user has already mentioned (read-only—never edit `notes/`).
 
@@ -56,15 +56,15 @@ Use the built-in CLI search commands to prospect open collections rapidly:
 
 ```bash
 # 1. Chronicling America historical U.S. newspapers (1770–1963, loc.gov)
-uv run genealogy search newspapers "Claude West" --state tennessee --start-year 1885 --end-year 1960 --limit 15
+genealogy search newspapers "Claude West" --state tennessee --start-year 1885 --end-year 1960 --limit 15
 
 # 2. NARA National Archives Catalog (federal records, census, military, land)
-uv run genealogy search nara "Cocke County Tennessee" --record-group 29 --limit 15
+genealogy search nara "Cocke County Tennessee" --record-group 29 --limit 15
 
 # 3. WikiTree public read-only API (SECONDARY LEADS ONLY!)
-uv run genealogy search wikitree --first Claude --last West --birth-date 1886 --birth-location Tennessee
-uv run genealogy search wikitree --profile West-12345
-uv run genealogy search wikitree --ancestors West-12345 --depth 3
+genealogy search wikitree --first Claude --last West --birth-date 1886 --birth-location Tennessee
+genealogy search wikitree --profile West-12345
+genealogy search wikitree --ancestors West-12345 --depth 3
 ```
 
 > **Strict GPS Warning on WikiTree & Online Trees:** Treat every WikiTree result strictly as an **authored/compiled lead** (`record_type: compiled`, `source_type: authored`). Mine WikiTree profiles for clues, linked original citations, and external IDs (`external_ids.wikitree`), but **never** promote WikiTree assertions directly to `status: confirmed` or `confidence: proven` without independent primary/original verification.

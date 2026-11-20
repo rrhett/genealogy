@@ -1,4 +1,4 @@
-name: Validate Genealogy Workspace
+name: Validate Genealogy Toolkit & Plugin
 
 on:
   push:
@@ -19,13 +19,13 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint code
-        run: uv run ruff check src tests .agents/hooks
+        run: uv run ruff check src tests plugin/hooks
 
       - name: Run unit & integration tests
-        run: uv run pytest
-
-      - name: Validate primary dataset (data/)
-        run: uv run genealogy validate
+        run: uv run pytest -v
 
       - name: Validate worked example (examples/west-family)
         run: uv run genealogy validate --root examples/west-family --strict
+
+      - name: Verify wheel bundles plugin assets
+        run: uv build

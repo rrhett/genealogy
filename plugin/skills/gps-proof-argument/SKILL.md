@@ -28,13 +28,13 @@ A conclusion meets the GPS only when **all five** elements are satisfied:
 Pull every source touching the claim using the repository CLI:
 
 ```bash
-uv run genealogy timeline <INDIVIDUAL_ID> --include-family
-uv run genealogy query "<SURNAME>" --fts
+genealogy timeline <INDIVIDUAL_ID> --include-family
+genealogy query "<SURNAME>" --fts
 ```
 
 Classify each source item using the 3×3 framework in [Evidence Analysis Map Reference](./references/evidence-analysis-map.md) (Source type → Information type → Evidence type). Verify that `source_type` and `information_type` in `data/sources/<ID>.md` reflect the actual record.
 
-> **Hard Gate:** Compiled/authored sources (`record_type: compiled` or `source_type: authored`, such as Ancestry trees, FamilySearch profiles, WikiTree, or GEDCOM imports) **never** count toward proof. `uv run genealogy validate` flags `GPS_COMPILED_ONLY` and `GPS_PROVEN_REL_COMPILED_ONLY` if proof relies on them.
+> **Hard Gate:** Compiled/authored sources (`record_type: compiled` or `source_type: authored`, such as Ancestry trees, FamilySearch profiles, WikiTree, or GEDCOM imports) **never** count toward proof. `genealogy validate` flags `GPS_COMPILED_ONLY` and `GPS_PROVEN_REL_COMPILED_ONLY` if proof relies on them.
 
 ### 2. Build an Evidence Correlation Matrix in `workspace/`
 Create or update a working section in `workspace/HYPOTHESES.md` (or a dedicated `workspace/proof_<slug>.md` file for complex cases) using this table structure:
@@ -78,7 +78,7 @@ Do **not** promote status/confidence until the criteria below are met:
 Run validation to verify there are no schema, biological, or GPS warnings:
 
 ```bash
-uv run genealogy validate
+genealogy validate
 ```
 
 Confirm zero errors and zero `GPS_CONFIRMED_UNDER_SOURCED`, `GPS_COMPILED_ONLY`, `GPS_PROVEN_REL_UNDER_SOURCED`, or `GPS_PROVEN_REL_COMPILED_ONLY` warnings.

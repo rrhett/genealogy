@@ -106,7 +106,7 @@ def scan_artifacts(root: Path | str) -> IntakeReport:
     excluded_by_sha: dict[str, list[dict[str, str]]] = defaultdict(list)
     for sid, src in ds.sources.items():
         if src.data.artifact_path:
-            art_p = (ds.root / src.data.artifact_path).resolve()
+            art_p = ds.resolve_artifact_path(src.data.artifact_path)
             sources_by_artifact[art_p].append((sid, src.data.artifact_sha256))
         if src.data.relevance == "excluded" and src.data.artifact_sha256:
             excluded_by_sha[src.data.artifact_sha256].append(
@@ -123,7 +123,7 @@ def scan_artifacts(root: Path | str) -> IntakeReport:
         for file_path in sorted(ds.artifacts_dir.rglob("*")):
             if not file_path.is_file() or file_path.name.startswith("."):
                 continue
-            rel = str(file_path.relative_to(ds.root)).replace("\\", "/")
+            rel = ds.logical_artifact_path(file_path)
             sha = compute_sha256(file_path)
             by_hash[sha].append(rel)
 

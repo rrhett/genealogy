@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -20,7 +21,27 @@ def _repo_root(payload: dict) -> Path:
     ws = payload.get("workspacePaths")
     if isinstance(ws, list) and ws:
         return Path(ws[0]).resolve()
+    cwd = payload.get("cwd")
+    if cwd:
+        return Path(str(cwd)).resolve()
     return Path(__file__).resolve().parents[2]
+
+
+def _configured_artifacts_dir(root: Path) -> Path | None:
+    env_dir = os.environ.get("GENEALOGY_ARTIFACTS_DIR")
+    if env_dir:
+        p = Path(env_dir).expanduser()
+        return p.resolve() if p.is_absolute() else (root / p).resolve()
+    cfg = root / ".genealogy.yaml"
+    if cfg.exists():
+        for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+            m = re.match(r"^\s*artifacts_dir\s*:\s*['\"]?([^'\"#]+?)['\"]?\s*$", line)
+            if m:
+                val = m.group(1).strip()
+                if val:
+                    p = Path(val).expanduser()
+                    return p.resolve() if p.is_absolute() else (root / p).resolve()
+    return None
 
 
 def _is_under(target: Path, parent: Path) -> bool:
@@ -33,7 +54,10 @@ def _is_under(target: Path, parent: Path) -> bool:
 
 def evaluate(payload: dict) -> dict[str, str]:
     root = _repo_root(payload)
-    artifacts_dir = root / "artifacts"
+    artifacts_dirs = [root / "artifacts"]
+    custom_art = _configured_artifacts_dir(root)
+    if custom_art and custom_art not in artifacts_dirs:
+        artifacts_dirs.append(custom_art)
     notes_dir = root / "notes"
 
     tool_call = payload.get("toolCall") or {}
@@ -43,8 +67,9 @@ def evaluate(payload: dict) -> dict[str, str]:
     if tool_name == "run_command":
         cmd = str(args.get("CommandLine") or args.get("command") or "")
         if _DESTRUCTIVE_CMD_RE.search(cmd):
-            # Check if command references top-level artifacts/ or notes/ (not examples/.../artifacts/)
-            if re.search(r"(?:^|[\s'\"`])(?:\./)?artifacts(?:/|[\s'\"`]|$)", cmd) or str(artifacts_dir) in cmd:
+            if re.search(r"(?:^|[\s'\"`])(?:\./)?artifacts(?:/|[\s'\"`]|$)", cmd) or any(
+                str(d) in cmd for d in artifacts_dirs
+            ):
                 return {
                     "decision": "deny",
                     "reason": "AGENTS.md guardrail: artifacts/ is READ-ONLY and cannot be modified or deleted.",
@@ -65,7 +90,7 @@ def evaluate(payload: dict) -> dict[str, str]:
         candidate = Path(str(raw_path))
         if not candidate.is_absolute():
             candidate = cwd / candidate
-        if _is_under(candidate, artifacts_dir):
+        if any(_is_under(candidate, ad) for ad in artifacts_dirs):
             return {
                 "decision": "deny",
                 "reason": "AGENTS.md guardrail: artifacts/ is READ-ONLY. Never modify, rename, or delete primary records.",

@@ -241,7 +241,7 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
             )
 
         if src.data.artifact_path:
-            art_file = (ds.root / src.data.artifact_path).resolve()
+            art_file = ds.resolve_artifact_path(src.data.artifact_path)
             if not art_file.exists():
                 add_error(
                     "MISSING_ARTIFACT",
@@ -268,7 +268,7 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
             if art_file.resolve() not in linked_artifacts:
                 add_warning(
                     "UNLINKED_ARTIFACT",
-                    f"Artifact '{_rel(art_file, ds.root)}' is not linked by any source file in data/sources/",
+                    f"Artifact '{ds.logical_artifact_path(art_file)}' is not linked by any source file in data/sources/",
                     art_file,
                 )
 
