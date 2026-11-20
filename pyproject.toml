@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "genealogy-workspace"
-version = "0.2.0"
+version = "0.3.0"
 description = "Evidence-based, AI-assisted genealogy research toolkit, validator, interactive viewer, and plugin"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +13,10 @@ dependencies = [
     "pydantic>=2.7.0",
     "pyyaml>=6.0.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rrhett/genealogy"
+Repository = "https://github.com/rrhett/genealogy"
 
 [project.scripts]
 genealogy = "genealogy.cli:main"

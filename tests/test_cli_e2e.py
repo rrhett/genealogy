@@ -65,6 +65,28 @@ def test_cli_db_query_timeline_tree_gedcom(tmp_path: Path, capsys) -> None:
     gaps = json.loads(capsys.readouterr().out)
     assert len(gaps["consanguineous_marriages"]) == 1
 
+    assert main(["tracts", "--root", str(EXAMPLE_ROOT), "--json"]) == 0
+    tracts = json.loads(capsys.readouterr().out)
+    assert tracts["tract_count"] == 1
+
+    assert (
+        main(
+            [
+                "dna",
+                "I-WEST-CLAUDE-1886",
+                "I-RAINWATER-OCTA-1890",
+                "--observed-cm",
+                "860",
+                "--root",
+                str(EXAMPLE_ROOT),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    dna = json.loads(capsys.readouterr().out)
+    assert dna["assessment"] == "consistent"
+
     rep_out = tmp_path / "claude_report.md"
     assert main(["report", "I-WEST-CLAUDE-1886", "--root", str(EXAMPLE_ROOT), "--out", str(rep_out)]) == 0
     assert "Family Group Sheet: Claude West" in rep_out.read_text(encoding="utf-8")

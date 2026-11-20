@@ -5,7 +5,7 @@ This repository is the **genealogy-workspace CLI toolkit and Antigravity plugin*
 > **Note:** The canonical genealogy researcher `AGENTS.md` (which is deployed into user data repositories and loaded by the Antigravity plugin) lives at `plugin/rules/AGENTS.md`.
 
 ## Repository Layout
-- `src/genealogy/` — Python package and `genealogy` CLI (`validate`, `intake`, `stats`, `build-db`, `query`, `timeline`, `tree`, `view`, `kinship`, `collapse`, `gaps`, `report`, `import-gedcom`, `export-gedcom`, `search`, `init`, `upgrade-workspace`).
+- `src/genealogy/` — Python package and `genealogy` CLI (`validate`, `intake`, `add-link`, `stats`, `build-db`, `query`, `timeline`, `tree`, `view`, `kinship`, `collapse`, `tracts`, `dna`, `gaps`, `report`, `import-gedcom`, `export-gedcom`, `search`, `init`, `upgrade-workspace`).
 - `plugin/` — Single source of truth for the Antigravity plugin (`plugin.json`, `hooks.json`, `hooks/`, `rules/AGENTS.md`, `skills/`). Bundled into the Python wheel via Hatchling `force-include` so `genealogy init` and `genealogy upgrade-workspace` stay in sync automatically.
 - `examples/west-family/` — Worked inosculated (endogamous) example dataset used for demos and integration tests.
 - `tests/` — Unit, hook, workspace bootstrap/upgrade, HTTP viewer, and CLI end-to-end tests.

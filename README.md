@@ -8,7 +8,7 @@ An AI-assisted, provenance-first genealogy CLI toolkit, interactive DAG tree vie
 
 Rather than cloning this Python codebase and mixing your private family archive into it, you keep **two cleanly separated pieces**:
 
-1. **This Toolkit (`genealogy-workspace`)** — Installed once globally via `uv tool install`. Ships the `genealogy` CLI plus the bundled researcher `AGENTS.md`, 6 domain skills, and read-only lifecycle hooks (`plugin/`).
+1. **This Toolkit (`genealogy-workspace`)** — Installed once globally via `uv tool install`. Ships the `genealogy` CLI plus the bundled researcher `AGENTS.md`, 7 domain skills, and read-only lifecycle hooks (`plugin/`).
 2. **Your Private Family Repo (`~/my-family-history`)** — Created with `genealogy init`. Contains **only** your family records (`data/`, `artifacts/`, `notes/`, `workspace/`), your local overrides (`AGENTS.local.md`), and synced agent rules/skills. Zero Python source code!
 
 ---
@@ -29,7 +29,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 `uv tool install` downloads this repository into an isolated environment and places the `genealogy` command on your `PATH` (no manual virtualenv activation needed):
 
 ```bash
-uv tool install git+https://github.com/<owner>/genealogy.git
+uv tool install git+https://github.com/rrhett/genealogy.git
 ```
 Verify it works from anywhere:
 ```bash
@@ -155,15 +155,18 @@ Use the bundled **`gedcom-triage`** skill to audit staged records for living-per
 | `genealogy init [DIR] [--lfs] [--artifacts-dir PATH] [--plugin-only]` | Bootstraps a fresh, private family-history Git repo separated from the Python toolkit. |
 | `genealogy upgrade-workspace [--dry-run] [--root DIR]` | Refreshes managed `AGENTS.md`, skills, and hooks after `uv tool upgrade genealogy-workspace` without touching user data. |
 | `genealogy validate [--root DIR] [--strict] [--json]` | Validates YAML schemas, IDs, referential integrity, artifact SHA-256 hashes, `parent_child` DAG acyclicity, biological/chronological sanity, excluded-lead guardrails, and GPS sourcing rules. |
-| `genealogy intake [--root DIR] [--scaffold] [--dry-run]` | Scans `artifacts/` (or configured `artifacts_dir`), computes SHA-256 checksums, flags duplicate downloads of **previously excluded leads**, and scaffolds starter `data/sources/` stubs. |
+| `genealogy intake [--root DIR] [--scaffold] [--url URL] [--dry-run]` | Scans `artifacts/` (or configured `artifacts_dir`), computes SHA-256 checksums, flags duplicate downloads of **previously excluded leads**, and scaffolds starter `data/sources/` stubs (optionally auto-parsing `--url` into `links:`). |
+| `genealogy add-link <SOURCE_ID> <URL> [--note TEXT]` | Auto-parses an Ancestry, FamilySearch, Newspapers.com, Find a Grave, Fold3, LoC, NARA, or WikiTree URL and appends it to `data/sources/<SOURCE_ID>.md` with `provider`, `requires_auth`, `accessed`, and extracted record IDs. |
 | `genealogy stats [--root DIR] [--json]` | Displays dataset counts (individuals by status/living, sources by type, relationships, linked vs. unlinked artifacts). |
 | `genealogy build-db [--root DIR] [--out PATH]` | Compiles `data/` into `build/genealogy.sqlite` with normalized tables and FTS5 full-text search (tagging `[EXCLUDED]` leads clearly). |
 | `genealogy query "<query>" [--fts] [--root DIR]` | Runs FTS5 full-text search (`--fts`) or read-only SQL `SELECT` queries against your Markdown dataset. |
 | `genealogy timeline <ID> [--include-family]` | Generates a chronological Markdown timeline (with estimated ages, land tracts, and optional interleaved family events). |
 | `genealogy tree [<ID>] [--format mermaid\|dot] [--depth N]` | Renders a Mermaid flowchart or Graphviz DOT graph of your family relationships. |
-| `genealogy view [--port 8765] [--out PATH] [--include-living]` | Launches a local interactive **DAG + Marriage-Hub** web viewer built for inosculated/endogamous families (multi-path kinship inspector, pedigree-collapse badges, Ancestry/FamilySearch links, inline artifact previews, excluded leads, and live reload)—or exports a single offline HTML file via `--out`. |
+| `genealogy view [--port 8765] [--out PATH] [--include-living]` | Launches a local interactive **DAG + Marriage-Hub** web viewer built for inosculated/endogamous families (multi-path kinship inspector, pedigree-collapse badges, **land-tract filter**, **era/census-year slider**, **SVG export**, **copy citation**, Ancestry/FamilySearch links, inline artifact previews, excluded leads, and live reload)—or exports a single offline HTML file via `--out`. |
 | `genealogy kinship <ID1> <ID2> [--json]` | Traces every distinct blood path between two individuals and computes Wright's coefficient of relationship ($r$) and expected offspring inbreeding ($F$). |
 | `genealogy collapse <ID> [--max-gen N] [--json]` | Reports per-generation pedigree collapse, multi-path ancestors (`×2`, `×3`…), and Wright's inbreeding coefficient ($F$). |
+| `genealogy tracts [--tract FILTER] [--json]` | Prints chronological chain-of-title tables grouped by land tract across deeds and probate events. |
+| `genealogy dna <ID1> <ID2> [--observed-cm CM] [--json]` | Endogamy-aware autosomal DNA expected shared cM calculator across all documented blood paths, flagging `higher_than_expected`, `lower_than_expected`, or `unexplained_match` results. |
 | `genealogy gaps [--json]` | Audits missing U.S. Federal Censuses (1790–1950, skipping 1890), promotion-ready `tentative` profiles, recorded discrepancies, consanguineous marriages, and excluded leads. |
 | `genealogy report <ID> [--out PATH] [--include-living]` | Generates a shareable Markdown Family Group Sheet & Research Dossier with numbered citations, provenance links, excluded leads, and living-person redaction. |
 | `genealogy import-gedcom <file> [--dest staging\|data]` | Imports GEDCOM 5.5.1 or 7.0 into `workspace/staging/` (default) or `data/`, preserving GPS provenance. |
@@ -176,13 +179,14 @@ Use the bundled **`gedcom-triage`** skill to audit staged records for living-per
 
 ## Bundled Domain Skills & Automated Guardrails (`plugin/`)
 
-* **6 On-Demand Skills (`plugin/skills/`):**
+* **7 On-Demand Skills (`plugin/skills/`):**
   * `artifact-transcription` — Verbatim OCR/transcription + 1790–1950 U.S. Census column reference + Ancestry/FamilySearch `links:` provenance.
   * `gps-proof-argument` — Genealogical Proof Standard workflow + Elizabeth Shown Mills's 3×3 Evidence Analysis Map.
   * `identity-disambiguation` — Same-name separation, FAN Club analysis, and `relevance: excluded` false-lead tracking.
   * `jurisdiction-history` — Historical county formation dates, parent counties, vital-registration start dates, and burnt-county workarounds.
   * `research-planning` — Brick-wall strategy, phonetic name-variant matrices, negative search logs, and open archival API commands.
   * `gedcom-triage` — Safe staging and vetting of external GEDCOM trees before promoting anything into `data/`.
+  * `dna-endogamy` — Endogamy-aware autosomal DNA shared-cM corroboration across multi-path pedigrees (`genealogy dna`).
 * **Mechanical Guardrails (`plugin/hooks.json`):**
   * `protect-boundaries` (`PreToolUse`): Hard-blocks writes/deletes inside `artifacts/` (and any external `artifacts_dir`) and asks for confirmation before modifying `notes/`.
   * `validate-data-on-stop` (`Stop`): Runs `genealogy validate` once the agent finishes editing `data/` and asks it to fix schema or reference errors before stopping.
@@ -194,7 +198,7 @@ Use the bundled **`gedcom-triage`** skill to audit staged records for living-per
 If you clone this toolkit repo to test it out or contribute:
 
 ```bash
-git clone https://github.com/<owner>/genealogy.git
+git clone https://github.com/rrhett/genealogy.git
 cd genealogy
 uv sync
 
@@ -202,6 +206,8 @@ uv sync
 uv run genealogy validate --root examples/west-family --strict
 uv run genealogy kinship I-WEST-CLAUDE-1886 I-RAINWATER-OCTA-1890 --root examples/west-family
 uv run genealogy collapse I-WEST-EDGAR-1909 --root examples/west-family
+uv run genealogy tracts --root examples/west-family
+uv run genealogy dna I-WEST-CLAUDE-1886 I-RAINWATER-OCTA-1890 --observed-cm 860 --root examples/west-family
 uv run genealogy gaps --root examples/west-family
 uv run genealogy view --root examples/west-family
 

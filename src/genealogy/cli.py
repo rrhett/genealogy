@@ -14,7 +14,9 @@ import httpx
 from genealogy import __version__
 from genealogy.analysis import (
     build_family_report_markdown,
+    compute_dna_corroboration,
     compute_kinship,
+    compute_land_tracts,
     compute_pedigree_collapse,
     compute_research_gaps,
 )
@@ -30,6 +32,7 @@ from genealogy.gedcom import export_gedcom, import_gedcom
 from genealogy.intake import scaffold_unlinked_sources, scan_artifacts
 from genealogy.loader import load_dataset
 from genealogy.timeline import build_timeline_markdown, render_tree
+from genealogy.urls import add_link_to_source
 from genealogy.validator import validate_dataset
 from genealogy.viewer import export_viewer_html, serve_viewer
 from genealogy.workspace import init_workspace, upgrade_workspace
@@ -111,7 +114,16 @@ def _cmd_intake(args: argparse.Namespace) -> int:
             print(f"  {h[:12]}...: {', '.join(paths)}")
 
     if args.scaffold:
-        created = scaffold_unlinked_sources(args.root, dry_run=args.dry_run)
+        try:
+            created = scaffold_unlinked_sources(
+                args.root,
+                dry_run=args.dry_run,
+                url=args.url,
+                link_note=args.link_note,
+            )
+        except ValueError as exc:
+            print(f"Intake error: {exc}", file=sys.stderr)
+            return 1
         if not created:
             print("No unlinked artifacts to scaffold.")
         else:
@@ -468,6 +480,90 @@ def _cmd_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tracts(args: argparse.Namespace) -> int:
+    data = compute_land_tracts(args.root, tract_filter=args.tract)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    if not data["tracts"]:
+        print("No land tracts recorded in individual events.")
+        return 0
+    for tr in data["tracts"]:
+        print(
+            f"Tract: {tr['tract_group']} "
+            f"({tr['event_count']} event(s), {len(tr['individuals_involved'])} individual(s))"
+        )
+        for e in tr["entries"]:
+            srcs = ", ".join(e["sources"]) if e["sources"] else "unsourced"
+            print(
+                f"  - {e['date']} | {e['primary_name']} ({e['individual_id']}) | "
+                f"{e['tract']} — {e['description']} [{srcs}]"
+            )
+    return 0
+
+
+def _cmd_dna(args: argparse.Namespace) -> int:
+    try:
+        rep = compute_dna_corroboration(
+            args.root,
+            args.person_a,
+            args.person_b,
+            observed_cm=args.observed_cm,
+            max_depth=args.max_depth,
+        )
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0
+    print(f"Endogamy-Aware DNA Corroboration: {rep['person_a_name']} <-> {rep['person_b_name']}")
+    print(f"  Documented Blood Paths:    {rep['path_count']}")
+    print(f"  Malecot Coancestry (phi):  {rep['coancestry']:.6f}  |  Wright's r: {rep['wright_relationship']:.5f}")
+    lo, hi = rep["expected_range_cm"]
+    print(f"  Expected Shared DNA:       ~{rep['expected_cm']:.1f} cM (plausible band: {lo:.1f}–{hi:.1f} cM)")
+    for idx, p in enumerate(rep["paths"], start=1):
+        print(
+            f"    {idx}. {p['label']} via {p['common_ancestor_name']} "
+            f"[{p['steps_a']}↑ / {p['steps_b']}↑]: ~{p['expected_cm']:.1f} cM"
+        )
+    if rep["observed_cm"] is not None:
+        print(f"  Observed Shared DNA:       {rep['observed_cm']:.1f} cM")
+        print(f"  Assessment:                {rep['assessment']}")
+        print(f"  Interpretation:            {rep['interpretation']}")
+    for note in rep["notes"]:
+        print(f"  Note: {note}")
+    return 0
+
+
+def _cmd_add_link(args: argparse.Namespace) -> int:
+    req_auth: bool | None = None
+    if args.auth:
+        req_auth = True
+    elif args.public:
+        req_auth = False
+    try:
+        src_path, lnk, added = add_link_to_source(
+            args.root,
+            args.source_id,
+            args.url,
+            note=args.note,
+            accessed=args.accessed,
+            requires_auth=req_auth,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"add-link error: {exc}", file=sys.stderr)
+        return 1
+    if not added:
+        print(f"Link already present on {args.source_id}: {lnk.url}")
+        return 0
+    auth_str = "auth required" if lnk.requires_auth else "public"
+    print(f"Added [{lnk.provider}] ({auth_str}, accessed {lnk.accessed}) to {src_path}")
+    if lnk.note:
+        print(f"  Note: {lnk.note}")
+    return 0
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     rep = init_workspace(
         args.directory,
@@ -583,9 +679,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_in = sub.add_parser("intake", help="Audit artifacts/, compute SHA-256 hashes, and scaffold missing sources")
     p_in.add_argument("--root", default=".", help="Workspace root directory (default: .)")
     p_in.add_argument("--scaffold", action="store_true", help="Create stub data/sources/ files for unlinked artifacts")
+    p_in.add_argument("--url", default=None, help="Optional Ancestry/FamilySearch/archival URL to attach when scaffolding")
+    p_in.add_argument("--link-note", default=None, help="Optional note for the --url provenance link")
     p_in.add_argument("--dry-run", action="store_true", help="Preview scaffolded files without writing")
     p_in.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_in.set_defaults(func=_cmd_intake)
+
+    # add-link
+    p_lnk = sub.add_parser("add-link", help="Auto-parse and attach an online provenance URL (Ancestry, FamilySearch, etc.) to a source")
+    p_lnk.add_argument("source_id", help="Source ID (e.g., S-1910-CENSUS-WEST-COCKE-TN)")
+    p_lnk.add_argument("url", help="Online record/image URL")
+    p_lnk.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_lnk.add_argument("--note", default=None, help="Override auto-extracted link note")
+    p_lnk.add_argument("--accessed", default=None, help="Access date YYYY-MM-DD (default: today)")
+    auth_grp = p_lnk.add_mutually_exclusive_group()
+    auth_grp.add_argument("--auth", action="store_true", help="Force requires_auth: true")
+    auth_grp.add_argument("--public", action="store_true", help="Force requires_auth: false")
+    p_lnk.set_defaults(func=_cmd_add_link)
 
     # stats
     p_st = sub.add_parser("stats", help="Show workspace counts and status overview")
@@ -670,6 +780,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--out", default=None, help="Optional output Markdown file path")
     p_rep.add_argument("--include-living", action="store_true", help="Include unredacted living details (default: redacted)")
     p_rep.set_defaults(func=_cmd_report)
+
+    # tracts
+    p_tracts = sub.add_parser("tracts", help="Display chronological chain-of-title tables grouped by land tract")
+    p_tracts.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_tracts.add_argument("--tract", default=None, help="Optional substring filter for a specific tract")
+    p_tracts.add_argument("--json", action="store_true", help="Output JSON")
+    p_tracts.set_defaults(func=_cmd_tracts)
+
+    # dna
+    p_dna = sub.add_parser("dna", help="Endogamy-aware autosomal DNA expected shared cM calculator across all blood paths")
+    p_dna.add_argument("person_a", help="First individual ID")
+    p_dna.add_argument("person_b", help="Second individual ID")
+    p_dna.add_argument("--observed-cm", type=float, default=None, help="Observed shared centiMorgans to evaluate against the pedigree")
+    p_dna.add_argument("--max-depth", type=int, default=10, help="Max upward generations (default: 10)")
+    p_dna.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_dna.add_argument("--json", action="store_true", help="Output JSON")
+    p_dna.set_defaults(func=_cmd_dna)
 
     # view
     p_view = sub.add_parser("view", help="Launch local interactive DAG tree viewer or export standalone HTML")

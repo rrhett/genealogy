@@ -14,7 +14,7 @@ import yaml
 from genealogy import __version__
 from genealogy.loader import load_workspace_config
 
-DEFAULT_TOOLKIT_REPO_URL = "git+https://github.com/OWNER/genealogy.git"
+DEFAULT_TOOLKIT_REPO_URL = "git+https://github.com/rrhett/genealogy.git"
 
 _USER_GITIGNORE = """\
 # Generated build artifacts (rebuilt from data/)

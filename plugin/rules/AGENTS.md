@@ -153,15 +153,19 @@ relationships:
    - `jurisdiction-history` — Historical county boundary changes, parent counties, and burnt-county checks.
    - `research-planning` — Brick-wall prioritization and negative search logs.
    - `gedcom-triage` — Safely staging and vetting imported GEDCOM trees before promoting anything to `data/`.
+   - `dna-endogamy` — Endogamy-aware autosomal DNA shared-cM corroboration across multi-path pedigrees.
 5. **CLI Quick Reference:**
    - `genealogy validate` — Validate `data/` schema, links, biology, and GPS standards.
-   - `genealogy intake [--scaffold]` — Audit `artifacts/` checksums and scaffold missing source stubs.
+   - `genealogy intake [--scaffold] [--url URL]` — Audit `artifacts/` checksums and scaffold missing source stubs.
+   - `genealogy add-link <SOURCE_ID> <URL>` — Auto-parse and attach Ancestry, FamilySearch, Newspapers.com, Find a Grave, Fold3, LoC, NARA, or WikiTree URLs to a source file.
    - `genealogy stats` — Summarize individuals, sources, relationships, and unlinked artifacts.
    - `genealogy build-db` / `genealogy query "<text>" --fts` — Compile and search SQLite + FTS5.
    - `genealogy timeline <ID> --include-family` — Generate chronological life timelines.
    - `genealogy tree [<ID>] --format mermaid` — Render family graphs.
-   - `genealogy view [--port 8765] [--out tree.html]` — Launch local interactive DAG viewer (or export standalone HTML) with pedigree-collapse & kinship-path highlighting, annotations, Ancestry/FamilySearch links, and inline artifact preview.
+   - `genealogy view [--port 8765] [--out tree.html]` — Launch local interactive DAG viewer (or export standalone HTML) with pedigree-collapse & kinship-path highlighting, land-tract lens, era/census slider, SVG export, copy citation, Ancestry/FamilySearch links, and inline artifact preview.
    - `genealogy kinship <ID1> <ID2>` / `genealogy collapse <ID>` — Trace all distinct blood paths, Wright's $r$ / $F$, and pedigree collapse across inosculated families.
+   - `genealogy tracts [--tract FILTER]` — Display chronological chain-of-title tables grouped by land tract.
+   - `genealogy dna <ID1> <ID2> [--observed-cm CM]` — Endogamy-aware autosomal DNA expected shared cM corroboration across all documented blood paths.
    - `genealogy gaps` — Audit missing U.S. Federal Censuses (1790–1950, excluding 1890), promotion-ready profiles, discrepancies, consanguineous marriages, and excluded leads.
    - `genealogy report <ID>` — Generate a shareable Markdown Family Group Sheet & Research Dossier.
    - `genealogy import-gedcom <file>` / `genealogy export-gedcom <out>` — GEDCOM 5.5.1 / 7.0 pipelines.

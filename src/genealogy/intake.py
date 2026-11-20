@@ -9,6 +9,7 @@ from pathlib import Path
 
 from genealogy.loader import load_dataset
 from genealogy.schema import render_frontmatter
+from genealogy.urls import parse_provenance_url
 from genealogy.validator import compute_sha256
 
 
@@ -163,16 +164,34 @@ def scan_artifacts(root: Path | str) -> IntakeReport:
 
 
 def scaffold_unlinked_sources(
-    root: Path | str, *, dry_run: bool = False
+    root: Path | str,
+    *,
+    dry_run: bool = False,
+    url: str | None = None,
+    link_note: str | None = None,
 ) -> list[tuple[str, Path]]:
     """Create stub `data/sources/<ID>.md` files for all unlinked artifacts.
 
     Never modifies `artifacts/`. Returns list of (source_id, path) created (or planned).
+    If `url` is supplied, attaches the parsed provenance link to each newly scaffolded stub.
     """
     report = scan_artifacts(root)
     src_dir = report.root / "data" / "sources"
     if not dry_run:
         src_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_links: list[dict[str, object]] = []
+    if url:
+        lnk = parse_provenance_url(url, note=link_note)
+        entry: dict[str, object] = {
+            "provider": lnk.provider,
+            "url": lnk.url,
+            "accessed": lnk.accessed,
+            "requires_auth": lnk.requires_auth,
+        }
+        if lnk.note:
+            entry["note"] = lnk.note
+        parsed_links.append(entry)
 
     created: list[tuple[str, Path]] = []
     existing_ids = {p.stem for p in src_dir.glob("*.md")} if src_dir.exists() else set()
@@ -195,7 +214,7 @@ def scaffold_unlinked_sources(
             "date": year_part if year_part.isdigit() else "undated",
             "jurisdiction": "TODO: County, State, Country",
             "repository": "",
-            "links": [],
+            "links": list(parsed_links),
             "artifact_path": art.rel_path,
             "artifact_sha256": art.sha256,
             "source_type": "original",

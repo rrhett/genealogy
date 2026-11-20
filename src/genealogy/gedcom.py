@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from genealogy import __version__
 from genealogy.loader import load_dataset
 from genealogy.schema import parse_genealogy_date, render_frontmatter
 
@@ -536,7 +537,7 @@ def export_gedcom(
     lines.extend(
         [
             "1 SOUR genealogy-workspace",
-            "2 VERS 0.1.0",
+            f"2 VERS {__version__}",
             f"1 DATE {datetime.date.today().strftime('%d %b %Y').upper()}",
         ]
     )

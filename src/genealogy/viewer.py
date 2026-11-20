@@ -15,8 +15,11 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from genealogy.analysis import (
+    US_CENSUS_YEARS,
+    _canonical_tract_group,
     _extract_discrepancy_bullets,
     compute_kinship,
+    compute_land_tracts,
     compute_pedigree_collapse,
     find_consanguineous_marriages,
 )
@@ -315,6 +318,18 @@ def _compute_dag_layout(
     }
 
 
+def _extract_formal_citation(body: str, fallback: str) -> str:
+    """Extract the prose under `## Formal Citation` (or return fallback)."""
+    m = re.search(r"^##\s+Formal Citation\s*$", body, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        return fallback
+    rest = body[m.end() :]
+    next_h = re.search(r"^##\s+", rest, re.MULTILINE)
+    section = (rest[: next_h.start()] if next_h else rest).strip()
+    lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
+    return " ".join(lines) if lines else fallback
+
+
 def _build_living_redactor(ds: Dataset) -> Any:
     """Return a function that replaces living individuals' names/variants with '[Living]'."""
     names: set[str] = set()
@@ -371,6 +386,21 @@ def build_viewer_payload(
             if iid in (rel.person_1, rel.person_2):
                 sids.update(rel.sources)
 
+        b_parsed = parse_genealogy_date(d.birth.date) if d.birth else None
+        d_parsed = parse_genealogy_date(d.death.date) if d.death else None
+        b_year = b_parsed.year_min if b_parsed else None
+        d_year = d_parsed.year_max if d_parsed else None
+
+        covered_censuses: set[int] = set()
+        for sid in sids:
+            src_obj = ds.sources.get(sid)
+            if src_obj and src_obj.data.record_type == "census" and src_obj.data.relevance != "excluded":
+                sd = parse_genealogy_date(src_obj.data.date)
+                if sd and sd.year_min:
+                    covered_censuses.add(sd.year_min)
+
+        ind_tracts = sorted({_canonical_tract_group(ev.tract) for ev in d.events if ev.tract and ev.tract.strip()})
+
         if redact_living and d.living:
             collapse_dict["primary_name"] = "Living (Redacted)"
             individuals_out[iid] = {
@@ -383,6 +413,10 @@ def build_viewer_payload(
                 "status": d.status,
                 "birth": None,
                 "death": None,
+                "birth_year": None,
+                "death_year": None,
+                "covered_census_years": [],
+                "tracts": [],
                 "events": [],
                 "external_ids": {},
                 "body_markdown": "Details redacted because this individual is marked `living: true`.",
@@ -404,6 +438,10 @@ def build_viewer_payload(
                 "status": d.status,
                 "birth": d.birth.model_dump() if d.birth else None,
                 "death": d.death.model_dump() if d.death else None,
+                "birth_year": b_year,
+                "death_year": d_year,
+                "covered_census_years": sorted(covered_censuses),
+                "tracts": ind_tracts,
                 "events": [ev.model_dump() for ev in d.events],
                 "external_ids": d.external_ids,
                 "body_markdown": scrubbed_body,
@@ -418,6 +456,7 @@ def build_viewer_payload(
     for sid in sorted(ds.sources.keys()):
         loaded = ds.sources[sid]
         s = loaded.data
+        fallback_cite = f"{s.title}" + (f"; {s.repository}" if s.repository else "")
         sources_out[sid] = {
             "id": sid,
             "title": scrub(s.title),
@@ -435,27 +474,40 @@ def build_viewer_payload(
             "excluded_for": s.excluded_for,
             "exclusion_reason": scrub(s.exclusion_reason) if s.exclusion_reason else None,
             "individuals_cited": s.individuals_cited,
+            "formal_citation": scrub(_extract_formal_citation(loaded.body, fallback_cite)),
             "body_markdown": scrub(loaded.body.strip()),
         }
 
     relationships_out = [r.model_dump() for r in ds.relationships]
+
+    tracts_raw = compute_land_tracts(ds)["tracts"]
+    if redact_living:
+        for tr in tracts_raw:
+            for entry in tr["entries"]:
+                iid = entry["individual_id"]
+                if iid in ds.individuals and ds.individuals[iid].data.living:
+                    entry["primary_name"] = "Living (Redacted)"
+                entry["description"] = scrub(entry["description"])
 
     return {
         "meta": {
             "workspace_name": ds.root.name,
             "generated_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             "redact_living": redact_living,
+            "us_census_years": US_CENSUS_YEARS,
             "counts": {
                 "individuals": len(ds.individuals),
                 "sources": len(ds.sources),
                 "relationships": len(ds.relationships),
                 "consanguineous_marriages": len(consanguineous_list),
+                "tracts": len(tracts_raw),
             },
         },
         "individuals": individuals_out,
         "sources": sources_out,
         "relationships": relationships_out,
         "consanguineous_marriages": [r.to_dict() for r in consanguineous_list],
+        "tracts": tracts_raw,
         "layout": layout,
     }
 
@@ -796,6 +848,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     .node-group.selected .node-card { stroke: var(--accent); stroke-width: 3; stroke-dasharray: none; }
     .node-group.compare-target .node-card { stroke: var(--consang); stroke-width: 3; stroke-dasharray: none; }
     .node-group.in-path .node-card { stroke: var(--collapse); stroke-width: 2.8; stroke-dasharray: none; }
+    .node-group.in-tract .node-card { stroke: var(--confirmed); stroke-width: 2.8; stroke-dasharray: none; }
     .node-group.dimmed { opacity: 0.22; }
 
     .node-name { font-size: 13px; font-weight: 700; fill: var(--text); }
@@ -804,6 +857,67 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
 
     .badge-collapse rect { fill: var(--collapse); rx: 8; }
     .badge-collapse text { fill: #fff; font-size: 10px; font-weight: 700; }
+    .badge-census-ok rect { fill: var(--confirmed); rx: 8; }
+    .badge-census-miss rect { fill: var(--tentative); rx: 8; }
+    .badge-census-ok text, .badge-census-miss text { fill: #fff; font-size: 10px; font-weight: 700; }
+
+    .era-bar {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.82rem;
+      padding: 0.22rem 0.55rem;
+      border-radius: 6px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+    }
+    .era-bar input[type="range"] {
+      width: 118px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .era-bar input[type="range"]:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    .era-year { font-variant-numeric: tabular-nums; font-weight: 700; min-width: 3.1rem; }
+
+    /* Accessible Copy Button per modern-web-guidance */
+    .copy-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      position: relative;
+    }
+    .copy-button {
+      min-inline-size: 24px;
+      min-block-size: 24px;
+    }
+    .copy-button[data-copied] { border-color: var(--confirmed); color: var(--confirmed); }
+    .copy-button[data-failed] { border-color: var(--consang); color: var(--consang); }
+    .copy-tip {
+      font-size: 0.74rem;
+      font-weight: 600;
+      color: var(--confirmed);
+      opacity: 0;
+      transition: opacity 150ms ease;
+    }
+    .copy-button[data-copied] + .copy-tip { opacity: 1; color: var(--confirmed); }
+    .copy-button[data-failed] + .copy-tip { opacity: 1; color: var(--consang); }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .node-card, .copy-tip { transition: none; }
+    }
 
     .hub-group { cursor: pointer; }
     .hub-diamond { fill: var(--surface); stroke: var(--muted); stroke-width: 1.8; }
@@ -886,10 +1000,20 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
       <option value="ancestors">View: Ancestors of Selected</option>
       <option value="descendants">View: Descendants of Selected</option>
     </select>
+    <select id="tract-filter" aria-label="Land tract filter">
+      <option value="">All Land Tracts</option>
+    </select>
+    <div class="era-bar">
+      <label><input id="era-enabled" type="checkbox"> Era</label>
+      <label class="sr-only" for="era-slider">Filter by year</label>
+      <input id="era-slider" type="range" min="1790" max="1960" step="10" value="1910" disabled aria-valuetext="Era filter disabled">
+      <span id="era-year-label" class="era-year">Off</span>
+    </div>
     <label class="toggle"><input id="toggle-fan" type="checkbox" checked> FAN Club</label>
     <label class="toggle"><input id="toggle-consang" type="checkbox" checked> Inosculation</label>
     <label class="toggle"><input id="toggle-excluded" type="checkbox"> Excluded</label>
     <label class="toggle"><input id="toggle-redact" type="checkbox" checked> Redact Living</label>
+    <button id="btn-export-svg" type="button" title="Download current family chart as SVG">Export SVG</button>
     <button id="btn-reload" type="button" title="Reload dataset from disk">Reload</button>
   </header>
 
@@ -945,11 +1069,63 @@ const state = {
   showExcluded: false,
   redactLiving: INITIAL_DATA ? !!INITIAL_DATA.meta.redact_living : true,
   focusMode: "all",
+  selectedTract: "",
+  eraEnabled: false,
+  eraYear: 1910,
   searchQuery: "",
   tx: 0,
   ty: 0,
   scale: 1,
 };
+
+let copyCounter = 0;
+let lastCopyMessage = "";
+const copyTimers = new WeakMap();
+
+function reportCopy(button, ok) {
+  const tip = button.nextElementSibling;
+  clearTimeout(copyTimers.get(button));
+  button.removeAttribute("data-copied");
+  button.removeAttribute("data-failed");
+  let message = ok ? "Copied" : "Copy failed";
+  if (message === lastCopyMessage) message += "\u00A0";
+  lastCopyMessage = message;
+  if (tip) tip.textContent = "";
+  void button.offsetWidth;
+  button.setAttribute(ok ? "data-copied" : "data-failed", "");
+  if (tip) requestAnimationFrame(() => { tip.textContent = message; });
+  copyTimers.set(button, setTimeout(() => {
+    button.removeAttribute("data-copied");
+    button.removeAttribute("data-failed");
+    if (tip) tip.textContent = "";
+  }, 2000));
+}
+
+async function handleCopyCommand(button, target) {
+  const text = target ? (target.textContent || "").trim() : "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    reportCopy(button, true);
+  } catch {
+    reportCopy(button, false);
+  }
+}
+
+function initCopyHandlers() {
+  if ("CommandEvent" in window) {
+    document.addEventListener("command", (event) => {
+      if (event.command === "--copy") handleCopyCommand(event.source, event.target);
+    }, true);
+  } else {
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest('button[command="--copy"]');
+      if (!button) return;
+      const target = document.getElementById(button.getAttribute("commandfor"));
+      if (target) handleCopyCommand(button, target);
+    });
+  }
+}
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs = {}) {
@@ -1177,11 +1353,31 @@ function getHighlightedSets() {
   return { pathNodes, pathPairs, multiPathBadges };
 }
 
+function isAliveInYear(ind, year) {
+  if (ind.redacted) return false;
+  if (ind.birth_year === null || ind.birth_year === undefined) return false;
+  if (ind.birth_year > year) return false;
+  if (ind.death_year !== null && ind.death_year !== undefined) return year <= ind.death_year;
+  if (ind.living) return true;
+  return year <= ind.birth_year + 85;
+}
+
+function getTractMatchSet() {
+  if (!state.selectedTract) return null;
+  const tr = (state.data.tracts || []).find(t => t.tract_group === state.selectedTract);
+  return tr ? new Set(tr.individuals_involved) : new Set();
+}
+
 function renderGraph() {
   const data = state.data;
   const layout = data.layout;
   const visible = getVisibleIds();
   const searchMatches = getSearchMatches();
+  const tractMatches = getTractMatchSet();
+  const usCensusSet = new Set(data.meta.us_census_years || []);
+  const eraActive = state.eraEnabled;
+  const eraYear = state.eraYear;
+  const isCensusYear = eraActive && usCensusSet.has(eraYear);
   const { pathNodes, pathPairs, multiPathBadges } = getHighlightedSets();
   const hasHighlight = pathNodes.size > 0;
 
@@ -1284,7 +1480,14 @@ function renderGraph() {
     if (state.selectedId === iid) cls.push("selected");
     if (state.compareId === iid) cls.push("compare-target");
     if (pathNodes.has(iid)) cls.push("in-path");
-    if ((searchMatches && !searchMatches.has(iid)) || (hasHighlight && !pathNodes.has(iid) && state.selectedId !== iid && state.compareId !== iid)) {
+    if (tractMatches && tractMatches.has(iid)) cls.push("in-tract");
+    const aliveNow = eraActive ? isAliveInYear(ind, eraYear) : true;
+    if (
+      (searchMatches && !searchMatches.has(iid)) ||
+      (tractMatches && !tractMatches.has(iid)) ||
+      (eraActive && !aliveNow) ||
+      (hasHighlight && !pathNodes.has(iid) && state.selectedId !== iid && state.compareId !== iid)
+    ) {
       cls.push("dimmed");
     }
 
@@ -1320,6 +1523,20 @@ function renderGraph() {
       bt.textContent = `×${mCount}`;
       bg.appendChild(bt);
       g.appendChild(bg);
+    }
+
+    // Era / Census coverage badge when Era slider is active on a U.S. Census year
+    if (isCensusYear && aliveNow) {
+      const hasCensus = (ind.covered_census_years || []).includes(eraYear);
+      const cBadge = svgEl("g", {
+        class: hasCensus ? "badge-census-ok" : "badge-census-miss",
+        transform: `translate(8, -9)`,
+      });
+      cBadge.appendChild(svgEl("rect", { width: 52, height: 18 }));
+      const ct = svgEl("text", { x: 26, y: 12.5, "text-anchor": "middle" });
+      ct.textContent = `${hasCensus ? "✓" : "?"} ${eraYear}`;
+      cBadge.appendChild(ct);
+      g.appendChild(cBadge);
     }
 
     g.addEventListener("click", (ev) => {
@@ -1432,6 +1649,20 @@ function renderSourceCard(src, isExcluded = false) {
       onClick: () => openArtifactPreview(src),
     }, `Preview Local Artifact (${src.artifact_path.split("/").pop()})`));
   }
+  if (src.formal_citation) {
+    const citeId = `cite-${++copyCounter}`;
+    linksWrap.appendChild(el("span", { id: citeId, className: "sr-only" }, src.formal_citation));
+    linksWrap.appendChild(el("span", { className: "copy-wrap" },
+      el("button", {
+        type: "button",
+        className: "btn copy-button",
+        command: "--copy",
+        commandfor: citeId,
+        "aria-label": `Copy citation for ${src.id}`,
+      }, "Copy Citation"),
+      el("span", { className: "copy-tip", role: "status" })
+    ));
+  }
   if (linksWrap.childNodes.length) det.appendChild(linksWrap);
 
   if (src.body_markdown) det.appendChild(renderMarkdownSafe(src.body_markdown));
@@ -1507,8 +1738,36 @@ function renderDrawer() {
     return;
   }
 
-  // Case 2: No selection — Workspace Overview & Inosculation Summary
+  // Case 2: No selection — Workspace Overview, Active Tract Chain-of-Title & Inosculation Summary
   if (!state.selectedId) {
+    if (state.selectedTract) {
+      const tr = (state.data.tracts || []).find(t => t.tract_group === state.selectedTract);
+      if (tr) {
+        drawer.appendChild(el("h2", {}, `Land Tract: ${tr.tract_group}`));
+        drawer.appendChild(el("div", { className: "source-meta" }, `${tr.event_count} recorded event(s) · ${tr.individuals_involved.length} individual(s)`));
+        const tbl = el("table", { className: "tl" },
+          el("thead", {}, el("tr", {}, el("th", {}, "Date"), el("th", {}, "Person"), el("th", {}, "Tract / Details")))
+        );
+        const tb = el("tbody");
+        for (const e of tr.entries) {
+          tb.appendChild(el("tr", {},
+            el("td", {}, e.date),
+            el("td", {}, el("button", { className: "jump-link", onClick: () => onNodeClick(e.individual_id, false) }, e.primary_name)),
+            el("td", {}, `${e.tract}${e.description ? " — " + e.description : ""}`)
+          ));
+        }
+        tbl.appendChild(tb);
+        drawer.appendChild(tbl);
+        if (tr.source_ids?.length) {
+          drawer.appendChild(el("h3", {}, "Deed & Probate Sources"));
+          for (const sid of tr.source_ids) {
+            if (state.data.sources[sid]) drawer.appendChild(renderSourceCard(state.data.sources[sid]));
+          }
+        }
+        return;
+      }
+    }
+
     drawer.appendChild(el("h2", {}, "Workspace Overview"));
     drawer.appendChild(el("p", {}, "Click any person card to inspect notes, discrepancies, sources, Ancestry/FamilySearch links, and pedigree collapse. Shift+Click a second person (or use Compare Kinship) to trace every blood path between them."));
 
@@ -1731,17 +1990,86 @@ function initDialogLightDismissFallback() {
   }
 }
 
+function populateTractFilter() {
+  const sel = document.getElementById("tract-filter");
+  const prev = state.selectedTract;
+  sel.replaceChildren(el("option", { value: "" }, "All Land Tracts"));
+  for (const tr of (state.data.tracts || [])) {
+    sel.appendChild(el("option", { value: tr.tract_group }, `Tract: ${tr.tract_group} (${tr.individuals_involved.length})`));
+  }
+  sel.value = prev;
+}
+
+function exportSvg() {
+  const orig = document.getElementById("graph");
+  const clone = orig.cloneNode(true);
+  const lw = state.data.layout.width || 960;
+  const lh = state.data.layout.height || 600;
+  clone.setAttribute("viewBox", `0 0 ${lw} ${lh}`);
+  clone.setAttribute("width", String(lw));
+  clone.setAttribute("height", String(lh));
+  const vp = clone.querySelector("#viewport");
+  if (vp) vp.setAttribute("transform", "translate(0,0) scale(1)");
+
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fb) => cs.getPropertyValue(name).trim() || fb;
+  const inlineCss = `
+    .node-card { fill: ${v("--surface", "#fff")}; stroke: ${v("--border", "#ccc")}; stroke-width: 1.6; rx: 10; }
+    .node-group.status-confirmed .node-card { stroke: ${v("--confirmed", "#047857")}; }
+    .node-group.status-tentative .node-card { stroke: ${v("--tentative", "#b45309")}; stroke-dasharray: 5 3; }
+    .node-group.in-path .node-card { stroke: ${v("--collapse", "#7c3aed")}; stroke-width: 2.8; }
+    .node-group.in-tract .node-card { stroke: ${v("--confirmed", "#047857")}; stroke-width: 2.8; }
+    .node-group.dimmed { opacity: 0.22; }
+    .node-name { font: 700 13px system-ui, sans-serif; fill: ${v("--text", "#161d26")}; }
+    .node-dates { font: 11px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; }
+    .node-id { font: 9.5px monospace; fill: ${v("--muted", "#5a6678")}; }
+    .badge-collapse rect { fill: ${v("--collapse", "#7c3aed")}; rx: 8; }
+    .badge-collapse text { fill: #fff; font: 700 10px system-ui, sans-serif; }
+    .badge-census-ok rect { fill: ${v("--confirmed", "#047857")}; rx: 8; }
+    .badge-census-miss rect { fill: ${v("--tentative", "#b45309")}; rx: 8; }
+    .badge-census-ok text, .badge-census-miss text { fill: #fff; font: 700 10px system-ui, sans-serif; }
+    .hub-diamond { fill: ${v("--surface", "#fff")}; stroke: ${v("--muted", "#5a6678")}; stroke-width: 1.8; }
+    .hub-group.consang .hub-diamond { fill: ${v("--consang", "#be123c")}; stroke: ${v("--consang", "#be123c")}; }
+    .hub-label { font: 10px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; text-anchor: middle; }
+    .hub-group.consang .hub-label { fill: ${v("--consang", "#be123c")}; font-weight: 700; }
+    .edge-path { fill: none; stroke: ${v("--muted", "#5a6678")}; stroke-width: 1.7; opacity: 0.72; }
+    .edge-path.proven { stroke: ${v("--confirmed", "#047857")}; opacity: 0.85; }
+    .edge-path.probable { stroke-dasharray: 6 3; }
+    .edge-path.speculative { stroke-dasharray: 2 3; }
+    .edge-path.fan { stroke: ${v("--fan", "#4338ca")}; stroke-dasharray: 4 4; }
+    .edge-path.consang { stroke: ${v("--consang", "#be123c")}; stroke-width: 2.2; }
+    .edge-path.highlighted { stroke: ${v("--collapse", "#7c3aed")}; stroke-width: 3.2; stroke-dasharray: none; opacity: 1; }
+    .edge-path.dimmed { opacity: 0.12; }
+  `;
+  const styleEl = svgEl("style");
+  styleEl.textContent = inlineCss;
+  const bgRect = svgEl("rect", { width: lw, height: lh, fill: v("--bg", "#f6f7f9") });
+  clone.insertBefore(bgRect, clone.firstChild);
+  clone.insertBefore(styleEl, clone.firstChild);
+
+  const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: `${state.data.meta.workspace_name || "genealogy"}-tree.svg` });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function reloadFromServer() {
   if (STANDALONE_MODE) return;
   const r = state.redactLiving ? "1" : "0";
   const resp = await fetch(`/api/graph.json?redact_living=${r}`);
   if (!resp.ok) return;
   state.data = await resp.json();
+  populateTractFilter();
   renderGraph();
   renderDrawer();
 }
 
 function initToolbar() {
+  populateTractFilter();
+
   document.getElementById("search-input").addEventListener("input", (e) => {
     state.searchQuery = e.target.value;
     renderGraph();
@@ -1750,9 +2078,37 @@ function initToolbar() {
     state.focusMode = e.target.value;
     renderGraph();
   });
+  document.getElementById("tract-filter").addEventListener("change", (e) => {
+    state.selectedTract = e.target.value;
+    if (state.selectedTract) { state.selectedId = null; state.selectedHubId = null; }
+    renderGraph();
+    renderDrawer();
+  });
+
+  const eraCheck = document.getElementById("era-enabled");
+  const eraSlider = document.getElementById("era-slider");
+  const eraLabel = document.getElementById("era-year-label");
+  const syncEra = () => {
+    state.eraEnabled = eraCheck.checked;
+    state.eraYear = parseInt(eraSlider.value, 10);
+    eraSlider.disabled = !state.eraEnabled;
+    if (!state.eraEnabled) {
+      eraLabel.textContent = "Off";
+      eraSlider.setAttribute("aria-valuetext", "Era filter disabled");
+    } else {
+      const isCen = (state.data.meta.us_census_years || []).includes(state.eraYear);
+      eraLabel.textContent = String(state.eraYear);
+      eraSlider.setAttribute("aria-valuetext", isCen ? `Year ${state.eraYear} (U.S. Census year)` : `Year ${state.eraYear}`);
+    }
+    renderGraph();
+  };
+  eraCheck.addEventListener("change", syncEra);
+  eraSlider.addEventListener("input", syncEra);
+
   document.getElementById("toggle-fan").addEventListener("change", (e) => { state.showFan = e.target.checked; renderGraph(); });
   document.getElementById("toggle-consang").addEventListener("change", (e) => { state.showConsang = e.target.checked; renderGraph(); });
   document.getElementById("toggle-excluded").addEventListener("change", (e) => { state.showExcluded = e.target.checked; renderGraph(); });
+  document.getElementById("btn-export-svg").addEventListener("click", exportSvg);
 
   const redactBox = document.getElementById("toggle-redact");
   redactBox.checked = state.redactLiving;
@@ -1771,6 +2127,7 @@ function initToolbar() {
 
 window.addEventListener("DOMContentLoaded", () => {
   initDialogLightDismissFallback();
+  initCopyHandlers();
   initPanZoom();
   initToolbar();
   renderGraph();

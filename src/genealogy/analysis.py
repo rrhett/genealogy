@@ -710,3 +710,182 @@ def build_family_report_markdown(
         lines.append("- *No sources cited*")
 
     return "\n".join(lines) + "\n"
+
+
+def _canonical_tract_group(tract: str) -> str:
+    """Group partitioned sub-tracts (e.g. 'French Broad River — East 60 acres') under their parent tract."""
+    for sep in (" — ", " -- ", " - "):
+        if sep in tract:
+            return tract.split(sep, 1)[0].strip()
+    return tract.strip()
+
+
+def compute_land_tracts(
+    root: Path | str | Dataset,
+    *,
+    tract_filter: str | None = None,
+) -> dict[str, Any]:
+    """Build chronological chain-of-title records grouped by canonical land tract."""
+    ds = root if isinstance(root, Dataset) else load_dataset(root)
+    filt = tract_filter.strip().lower() if tract_filter else None
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for iid in sorted(ds.individuals.keys()):
+        ind = ds.individuals[iid].data
+        if ind.status == "excluded":
+            continue
+        for ev in ind.events:
+            if not ev.tract or not ev.tract.strip():
+                continue
+            raw_tract = ev.tract.strip()
+            group_name = _canonical_tract_group(raw_tract)
+            if filt and filt not in raw_tract.lower() and filt not in group_name.lower():
+                continue
+            parsed = parse_genealogy_date(ev.date)
+            sort_key = parsed.sort_key if parsed else (9999, 99, 99)
+            grouped[group_name].append(
+                {
+                    "_sort": sort_key,
+                    "date": ev.date or "Undated",
+                    "individual_id": iid,
+                    "primary_name": ind.primary_name,
+                    "event_type": ev.type,
+                    "tract": raw_tract,
+                    "place": ev.place or "",
+                    "description": ev.description or "",
+                    "sources": list(ev.sources),
+                }
+            )
+
+    tracts_out: list[dict[str, Any]] = []
+    for group_name in sorted(grouped.keys()):
+        entries = sorted(grouped[group_name], key=lambda e: (e["_sort"], e["individual_id"]))
+        clean_entries = [{k: v for k, v in e.items() if k != "_sort"} for e in entries]
+        inds = sorted({e["individual_id"] for e in clean_entries})
+        srcs = sorted({s for e in clean_entries for s in e["sources"]})
+        tracts_out.append(
+            {
+                "tract_group": group_name,
+                "individuals_involved": inds,
+                "source_ids": srcs,
+                "event_count": len(clean_entries),
+                "entries": clean_entries,
+            }
+        )
+
+    return {
+        "root": str(ds.root),
+        "tract_count": len(tracts_out),
+        "tracts": tracts_out,
+    }
+
+
+def compute_dna_corroboration(
+    root: Path | str | Dataset,
+    person_a: str,
+    person_b: str,
+    *,
+    observed_cm: float | None = None,
+    genome_cm: float = 6800.0,
+    max_depth: int = 10,
+) -> dict[str, Any]:
+    """Compare endogamy-aware expected shared autosomal DNA (cM) across all paths vs observed cM."""
+    kin = compute_kinship(root, person_a, person_b, max_depth=max_depth)
+    # Expected shared autosomal DNA from Malecot coancestry: 2 * phi * genome_cm
+    expected_cm = round(2.0 * kin.coancestry * genome_cm, 1)
+
+    path_breakdown = [
+        {
+            "common_ancestor": p.common_ancestor,
+            "common_ancestor_name": p.common_ancestor_name,
+            "label": p.label,
+            "steps_a": p.steps_a,
+            "steps_b": p.steps_b,
+            "expected_cm": round(p.path_contribution * genome_cm, 1),
+        }
+        for p in kin.paths
+    ]
+
+    # Detect potential IBD2 overlap (full siblings or double-cousin-like multiple paths)
+    sibling_paths = [p for p in kin.paths if p.steps_a == 1 and p.steps_b == 1]
+    has_ibd2_note = len(sibling_paths) >= 2 or len(kin.paths) >= 4
+
+    if expected_cm <= 0.0:
+        low_cm, high_cm = 0.0, 0.0
+        upper_ceiling = 0.0
+    elif len(kin.paths) == 1 and {kin.paths[0].steps_a, kin.paths[0].steps_b} == {0, 1}:
+        low_cm, high_cm = 3150.0, 3650.0
+        upper_ceiling = 3750.0
+    else:
+        min_meioses = min((p.steps_a + p.steps_b) for p in kin.paths) if kin.paths else 6
+        rel_spread = min(0.85, max(0.28, 0.25 + 0.09 * min_meioses))
+        low_cm = max(0.0, round(expected_cm * (1.0 - rel_spread), 1))
+        high_cm = min(round(genome_cm * 0.55, 1), round(expected_cm * (1.0 + rel_spread), 1))
+        upper_ceiling = min(round(genome_cm * 0.58, 1), round(max(high_cm, expected_cm * 1.45 + 35.0), 1))
+
+    assessment: str | None = None
+    interpretation = ""
+    if observed_cm is not None:
+        if expected_cm <= 0.0:
+            if observed_cm > 0.0:
+                assessment = "unexplained_match"
+                interpretation = (
+                    f"Observed {observed_cm:.1f} cM with 0 documented blood paths in data/. "
+                    "Investigate an undocumented ancestral connection or FAN/collateral link."
+                )
+            else:
+                assessment = "consistent"
+                interpretation = "0 cM observed matches 0 documented blood paths."
+        elif observed_cm > upper_ceiling:
+            assessment = "higher_than_expected"
+            interpretation = (
+                f"Observed {observed_cm:.1f} cM exceeds the multi-path expectation "
+                f"({expected_cm:.1f} cM; band {low_cm:.1f}–{high_cm:.1f} cM). "
+                "Strong signal of an undiscovered additional cousin path (deeper endogamy) or a closer relationship."
+            )
+        elif observed_cm < low_cm:
+            assessment = "lower_than_expected"
+            interpretation = (
+                f"Observed {observed_cm:.1f} cM falls below the documented expectation "
+                f"({expected_cm:.1f} cM; band {low_cm:.1f}–{high_cm:.1f} cM). "
+                "Check for a half-relationship, non-paternity event (NPE), adoption, or misattached branch."
+            )
+        else:
+            assessment = "consistent"
+            interpretation = (
+                f"Observed {observed_cm:.1f} cM is consistent with the {len(kin.paths)} documented "
+                f"blood path(s) (expected ~{expected_cm:.1f} cM; band {low_cm:.1f}–{high_cm:.1f} cM)."
+            )
+
+    notes: list[str] = []
+    if len(kin.paths) > 1:
+        notes.append(
+            "Endogamy effect: standard single-path DNA charts overestimate closeness because "
+            f"shared DNA compounds across all {len(kin.paths)} known blood paths."
+        )
+    if has_ibd2_note:
+        notes.append(
+            "IBD2 caution: Full siblings and multi-path double cousins share fully identical (IBD2) regions. "
+            "AncestryDNA counts IBD2 segments once (~2,600 cM for full siblings), whereas 23andMe/FTDNA count both copies (~3,400 cM)."
+        )
+
+    return {
+        "person_a": kin.person_a,
+        "person_a_name": kin.person_a_name,
+        "person_b": kin.person_b,
+        "person_b_name": kin.person_b_name,
+        "are_married": kin.are_married,
+        "coancestry": round(kin.coancestry, 6),
+        "wright_relationship": round(kin.wright_relationship, 6),
+        "genome_cm": genome_cm,
+        "expected_cm": expected_cm,
+        "expected_range_cm": [low_cm, high_cm],
+        "observed_cm": observed_cm,
+        "assessment": assessment,
+        "interpretation": interpretation,
+        "path_count": len(path_breakdown),
+        "paths": path_breakdown,
+        "notes": notes,
+    }
+

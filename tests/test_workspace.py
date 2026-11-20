@@ -30,9 +30,12 @@ def test_init_workspace_creates_clean_git_repo_and_validates(tmp_path: Path) -> 
     assert (target / "AGENTS.local.md").is_file()
     assert (target / ".agents" / "hooks.json").is_file()
     assert (target / ".agents" / "hooks" / "guard_boundaries.py").is_file()
-    assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 6
+    assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 7
     assert (target / ".gitattributes").is_file()
     assert "filter=lfs" in (target / ".gitattributes").read_text(encoding="utf-8")
+    assert "github.com/rrhett/genealogy.git" in (
+        target / ".github" / "workflows" / "validate.yml"
+    ).read_text(encoding="utf-8")
     assert (target / ".genealogy.yaml").is_file()
     assert (target / "data" / "relationships.yaml").is_file()
 

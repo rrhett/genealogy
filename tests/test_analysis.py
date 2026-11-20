@@ -8,7 +8,9 @@ import pytest
 
 from genealogy.analysis import (
     build_family_report_markdown,
+    compute_dna_corroboration,
     compute_kinship,
+    compute_land_tracts,
     compute_pedigree_collapse,
     compute_research_gaps,
     find_consanguineous_marriages,
@@ -134,3 +136,43 @@ def test_research_gaps_and_family_report() -> None:
     jane_full = build_family_report_markdown(EXAMPLE_ROOT, "I-WEST-JANE-1950", redact_living=False)
     assert "Jane West" in jane_full
     assert "Pedigree Collapse" in jane_full
+
+
+def test_land_tracts_and_dna_corroboration() -> None:
+    tracts = compute_land_tracts(EXAMPLE_ROOT)
+    assert tracts["tract_count"] == 1
+    fb = tracts["tracts"][0]
+    assert fb["tract_group"] == "French Broad River"
+    assert fb["event_count"] == 4
+    assert "I-WEST-THOMAS-1830" in fb["individuals_involved"]
+    assert "I-WEST-JOHN-1858" in fb["individuals_involved"]
+    assert "I-WEST-MARY-1860" in fb["individuals_involved"]
+
+    filtered = compute_land_tracts(EXAMPLE_ROOT, tract_filter="East 60")
+    assert filtered["tract_count"] == 1
+    assert filtered["tracts"][0]["event_count"] == 1
+
+    # Claude & Octa are 1st cousins (r = 0.125 -> expected ~850 cM)
+    dna_ok = compute_dna_corroboration(
+        EXAMPLE_ROOT, "I-WEST-CLAUDE-1886", "I-RAINWATER-OCTA-1890", observed_cm=860.0
+    )
+    assert dna_ok["expected_cm"] == pytest.approx(850.0, abs=1.0)
+    assert dna_ok["assessment"] == "consistent"
+    assert len(dna_ok["paths"]) == 2
+
+    dna_high = compute_dna_corroboration(
+        EXAMPLE_ROOT, "I-WEST-CLAUDE-1886", "I-RAINWATER-OCTA-1890", observed_cm=1650.0
+    )
+    assert dna_high["assessment"] == "higher_than_expected"
+
+    dna_low = compute_dna_corroboration(
+        EXAMPLE_ROOT, "I-WEST-CLAUDE-1886", "I-RAINWATER-OCTA-1890", observed_cm=120.0
+    )
+    assert dna_low["assessment"] == "lower_than_expected"
+
+    # Unrelated founders (Thomas West & Sarah Miller) with observed DNA -> unexplained_match
+    dna_unexp = compute_dna_corroboration(
+        EXAMPLE_ROOT, "I-WEST-THOMAS-1830", "I-MILLER-SARAH-1834", observed_cm=150.0
+    )
+    assert dna_unexp["expected_cm"] == 0.0
+    assert dna_unexp["assessment"] == "unexplained_match"

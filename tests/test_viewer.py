@@ -28,6 +28,10 @@ def test_viewer_payload_and_static_export(tmp_path: Path) -> None:
     assert payload["individuals"]["I-WEST-JOHN-1858"]["excluded_source_ids"] == [
         "S-1880-CENSUS-WEST-JOHN-DIST9"
     ]
+    assert payload["individuals"]["I-WEST-CLAUDE-1886"]["covered_census_years"] == [1900, 1910]
+    assert payload["meta"]["counts"]["tracts"] == 1
+    assert payload["tracts"][0]["tract_group"] == "French Broad River"
+    assert "1910 U.S. census" in payload["sources"]["S-1910-CENSUS-WEST-COCKE-TN"]["formal_citation"]
     assert any(h["consanguineous"] for h in payload["layout"]["hubs"])
 
     # Standalone HTML export
@@ -35,6 +39,10 @@ def test_viewer_payload_and_static_export(tmp_path: Path) -> None:
     html_text = out_html.read_text(encoding="utf-8")
     assert '<meta name="color-scheme" content="light dark">' in html_text
     assert '<dialog id="artifact-dialog" closedby="any"' in html_text
+    assert 'id="tract-filter"' in html_text
+    assert 'id="era-slider"' in html_text
+    assert 'id="btn-export-svg"' in html_text
+    assert 'command: "--copy"' in html_text
     assert "STANDALONE_MODE = true" in html_text
     assert "Living (Redacted)" in html_text
     assert "Jane West" not in html_text
