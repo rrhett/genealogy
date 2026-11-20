@@ -255,6 +255,7 @@ class IndividualFrontmatter(BaseModel):
     death: VitalEvent | None = None
     events: list[LifeEvent] = Field(default_factory=list)
     external_ids: dict[str, str] = Field(default_factory=dict)
+    custom: dict[str, Any] = Field(default_factory=dict)
     status: Literal["confirmed", "tentative", "hypothetical", "excluded"] = "tentative"
 
     @field_validator("id")
@@ -351,6 +352,7 @@ class SourceFrontmatter(BaseModel):
     excluded_for: list[str] = Field(default_factory=list)
     exclusion_reason: str | None = None
     individuals_cited: list[str] = Field(default_factory=list)
+    custom: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("id")
     @classmethod
@@ -408,6 +410,7 @@ class Relationship(BaseModel):
     confidence: ConfidenceLevel = "speculative"
     sources: list[str] = Field(default_factory=list)
     notes: str = ""
+    custom: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("person_1", "person_2")
     @classmethod

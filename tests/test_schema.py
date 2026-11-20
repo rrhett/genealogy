@@ -110,3 +110,35 @@ def test_frontmatter_roundtrip() -> None:
     parsed_meta, parsed_body = split_frontmatter(rendered)
     assert parsed_meta == meta
     assert parsed_body == body
+
+
+def test_custom_fields_allowed_while_unknown_top_level_keys_forbidden() -> None:
+    ind = IndividualFrontmatter(
+        id="I-WEST-CLAUDE-1886",
+        primary_name="Claude West",
+        custom={"godparents": ["Jane Doe"], "dna_haplogroup": "R-M269"},
+    )
+    assert ind.custom["godparents"] == ["Jane Doe"]
+
+    src = SourceFrontmatter(
+        id="S-1910-CENSUS-WEST",
+        title="1910 Census",
+        record_type="census",
+        custom={"microfilm_frame": 42},
+    )
+    assert src.custom["microfilm_frame"] == 42
+
+    rel = Relationship(
+        type="fan_associate",
+        person_1="I-WEST-CLAUDE-1886",
+        person_2="I-RAINWATER-OCTA-1890",
+        custom={"role": "baptism_sponsor"},
+    )
+    assert rel.custom["role"] == "baptism_sponsor"
+
+    with pytest.raises(ValidationError):
+        IndividualFrontmatter(
+            id="I-WEST-CLAUDE-1886",
+            primary_name="Claude West",
+            unexpected_key="should fail",  # type: ignore[call-arg]
+        )

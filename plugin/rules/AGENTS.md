@@ -140,7 +140,16 @@ relationships:
     confidence: proven           # proven | probable | speculative
     sources: ["S-1900-CENSUS-WEST-COCKE-TN", "S-1954-DEATH-WEST-CLAUDE"]
     notes: ""
+    custom: {}                   # Optional user-defined metadata (see below)
 ```
+
+### Custom Fields, Out-of-Schema Data & Toolkit Feedback
+Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown keys to catch typos). When the user wants to track information that does not cleanly fit any native field, `events` type, or `relationships` type:
+1. **Check Native Fields First:** Before treating data as out-of-schema, verify whether an existing field, `events` (`type: other`), or `relationships` (`fan_associate` + `notes`) already covers it.
+2. **Warn & Prompt (Never Silently Drop or Invent Keys):** Tell the user explicitly what the current schema does not natively model, and ask how they want to store it:
+   - **`custom:` map** (available on `IndividualFrontmatter`, `SourceFrontmatter`, and `Relationship`, e.g. `custom: { godparents: ["..."] }`) for structured, machine-readable attributes clearly marked as non-canonical.
+   - **Markdown body** (e.g., `## Additional Notes` in `data/individuals/<ID>.md` or `data/sources/<ID>.md`) for freeform narrative details.
+3. **Log Gaps Locally (Opt-In & Privacy-Safe):** With the user's permission, record recurring or high-value schema/tooling gaps in `workspace/TOOLKIT_FEEDBACK.md` (noting *what* they wanted to track and *how* it was stored in `custom:` or prose). Never transmit repo data anywhere; if the user chooses to share feedback upstream later, strip all personal names, dates, places, and citations so only the abstract use case is shared.
 
 ---
 
