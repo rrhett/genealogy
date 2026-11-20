@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from genealogy.schema import (
     IndividualFrontmatter,
     Relationship,
+    RelationshipConstraint,
     RelationshipsFile,
     SourceFrontmatter,
     read_markdown_frontmatter,
@@ -47,6 +48,7 @@ class Dataset:
     individuals: dict[str, LoadedIndividual] = field(default_factory=dict)
     sources: dict[str, LoadedSource] = field(default_factory=dict)
     relationships: list[Relationship] = field(default_factory=list)
+    constraints: list[RelationshipConstraint] = field(default_factory=list)
     load_errors: list[LoadError] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)
 
@@ -155,6 +157,7 @@ def load_dataset(root: Path | str) -> Dataset:
                     raw_rel = {"relationships": []}
                 parsed = RelationshipsFile.model_validate(raw_rel)
                 ds.relationships = parsed.relationships
+                ds.constraints = parsed.constraints
             except (ValueError, yaml.YAMLError, ValidationError) as exc:
                 ds.load_errors.append(LoadError(rel_path, str(exc)))
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from genealogy.constraints import evaluate_constraint
 from genealogy.loader import Dataset, load_dataset
 from genealogy.schema import parse_genealogy_date
 
@@ -473,6 +474,73 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
         if color[node] == WHITE:
             dfs(node, [])
 
+    # 5b. Relationship constraints: referential integrity, GPS, and consistency
+    for idx, con in enumerate(ds.constraints, start=1):
+        cid = con.id or f"#{idx}"
+        p1, p2 = con.person_1, con.person_2
+        if p1 not in ds.individuals:
+            add_error(
+                "MISSING_INDIVIDUAL_REF",
+                f"Constraint {cid} ({con.type}) references unknown person_1 '{p1}'",
+                rel_path,
+            )
+        if p2 not in ds.individuals:
+            add_error(
+                "MISSING_INDIVIDUAL_REF",
+                f"Constraint {cid} ({con.type}) references unknown person_2 '{p2}'",
+                rel_path,
+            )
+        for sid in con.sources:
+            if sid not in ds.sources:
+                add_error(
+                    "MISSING_SOURCE_REF",
+                    f"Constraint {cid} ({p1} <-> {p2}) references unknown source '{sid}'",
+                    rel_path,
+                )
+            elif ds.sources[sid].data.relevance == "excluded":
+                add_error(
+                    "EXCLUDED_SOURCE_CITED",
+                    f"Constraint {cid} ({p1} <-> {p2}) cites excluded source '{sid}'",
+                    rel_path,
+                )
+
+        if not con.sources:
+            add_warning(
+                "UNSOURCED_CONSTRAINT",
+                f"Constraint {cid} ({p1} <-> {p2}) has no cited sources",
+                rel_path,
+            )
+        elif con.confidence == "proven":
+            non_compiled = [
+                ds.sources[s]
+                for s in con.sources
+                if s in ds.sources
+                and ds.sources[s].data.record_type != "compiled"
+                and ds.sources[s].data.source_type != "authored"
+            ]
+            if len(con.sources) < 2:
+                add_warning(
+                    "GPS_PROVEN_REQUIRES_TWO_SOURCES",
+                    f"Constraint {cid} ({p1} <-> {p2}) is confidence='proven' with fewer than 2 sources",
+                    rel_path,
+                )
+            elif not non_compiled:
+                add_warning(
+                    "GPS_COMPILED_ONLY",
+                    f"Constraint {cid} ({p1} <-> {p2}) is confidence='proven' using only compiled/authored sources",
+                    rel_path,
+                )
+
+        if p1 in ds.individuals and p2 in ds.individuals:
+            ev = evaluate_constraint(ds, con, index=idx)
+            if ev.status == "violated":
+                msg = ev.deductions[0].message if ev.deductions else "Constraint contradicted by pedigree."
+                add_warning(
+                    "CONSTRAINT_VIOLATED",
+                    f"Constraint {cid} ({p1} <-> {p2}, steps {con.steps_1}/{con.steps_2}): {msg}",
+                    rel_path,
+                )
+
     # 6. Cross-check bidirectional source <-> individual references (warning only)
     for sid, src in ds.sources.items():
         if src.data.relevance == "excluded":
@@ -484,7 +552,10 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
             cited_in_rel = any(
                 sid in r.sources and iid in (r.person_1, r.person_2) for r in ds.relationships
             )
-            if not cited_in_ind and not cited_in_rel:
+            cited_in_con = any(
+                sid in c.sources and iid in (c.person_1, c.person_2) for c in ds.constraints
+            )
+            if not cited_in_ind and not cited_in_rel and not cited_in_con:
                 add_warning(
                     "ONE_WAY_SOURCE_LINK",
                     f"Source '{sid}' cites '{iid}', but '{iid}' does not reference '{sid}' in its profile or relationships",

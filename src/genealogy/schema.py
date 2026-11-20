@@ -393,6 +393,7 @@ class SourceFrontmatter(BaseModel):
 RelationshipType = Literal["parent_child", "marriage", "sibling", "fan_associate"]
 ParentChildSubtype = Literal["biological", "adoptive", "step", "foster", "unknown"]
 ConfidenceLevel = Literal["proven", "probable", "speculative"]
+ConstraintType = Literal["common_ancestor", "consanguinity", "affinity"]
 
 
 class Relationship(BaseModel):
@@ -444,12 +445,60 @@ class Relationship(BaseModel):
         return self
 
 
+class RelationshipConstraint(BaseModel):
+    """Deductive relationship constraint (e.g., from marriage dispensations / dispensas).
+
+    Formalizes partial genealogical knowledge such as: 'one grandparent of person_1
+    (steps_1=2) is a great-grandparent of person_2 (steps_2=3)'.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    type: ConstraintType = "common_ancestor"
+    person_1: str
+    person_2: str
+    steps_1: int = Field(ge=0, le=15)
+    steps_2: int = Field(ge=0, le=15)
+    symmetric: bool = False
+    common_ancestor_sex: Literal["M", "F"] | None = None
+    common_ancestor_surname: str | None = None
+    confidence: ConfidenceLevel = "probable"
+    sources: list[str] = Field(default_factory=list)
+    notes: str = ""
+    custom: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("person_1", "person_2")
+    @classmethod
+    def validate_person_id(cls, v: str) -> str:
+        if not INDIVIDUAL_ID_RE.match(v):
+            raise ValueError(f"Invalid individual ID '{v}'")
+        return v
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, v: list[str]) -> list[str]:
+        for sid in v:
+            if not SOURCE_ID_RE.match(sid):
+                raise ValueError(f"Invalid source ID '{sid}'")
+        return v
+
+    @model_validator(mode="after")
+    def validate_constraint(self) -> RelationshipConstraint:
+        if self.person_1 == self.person_2:
+            raise ValueError(f"Self-referential constraint is invalid ({self.person_1})")
+        if self.steps_1 + self.steps_2 < 1:
+            raise ValueError("steps_1 + steps_2 must be at least 1")
+        return self
+
+
 class RelationshipsFile(BaseModel):
     """Top-level schema for data/relationships.yaml."""
 
     model_config = ConfigDict(extra="forbid")
 
     relationships: list[Relationship] = Field(default_factory=list)
+    constraints: list[RelationshipConstraint] = Field(default_factory=list)
 
 
 # --- Markdown Frontmatter Helpers ---

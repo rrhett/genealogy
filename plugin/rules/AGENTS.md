@@ -141,6 +141,20 @@ relationships:
     sources: ["S-1900-CENSUS-WEST-COCKE-TN", "S-1954-DEATH-WEST-CLAUDE"]
     notes: ""
     custom: {}                   # Optional user-defined metadata (see below)
+
+constraints:                     # Optional deductive relationship constraints (e.g., from dispensas matrimoniales)
+  - id: RC-1865-GARCIA-LOPEZ     # Optional constraint identifier
+    type: common_ancestor        # common_ancestor | consanguinity | affinity
+    person_1: I-LOPEZ-MARIA-1845 # e.g., bride
+    person_2: I-GARCIA-JOSE-1842 # e.g., groom
+    steps_1: 2                   # Generations from person_1 to common ancestor (2 = grandparent)
+    steps_2: 3                   # Generations from person_2 to common ancestor (3 = great-grandparent)
+    symmetric: false             # Optional: true if either (steps_1, steps_2) or (steps_2, steps_1) may hold
+    common_ancestor_sex: M       # Optional: M | F if specified by the record
+    common_ancestor_surname: ""  # Optional surname hint
+    confidence: probable         # proven | probable | speculative
+    sources: ["S-1865-CHURCH-DISPENSA-JALISCO"]
+    notes: "Dispensa states a grandparent of the bride is a great-grandparent of the groom."
 ```
 
 ### Custom Fields, Out-of-Schema Data & Toolkit Feedback
@@ -176,6 +190,7 @@ Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown
    - `genealogy tree [<ID>] --format mermaid` — Render family graphs.
    - `genealogy view [--port 8765] [--out tree.html]` — Launch local interactive DAG viewer (or export standalone HTML) with pedigree-collapse & kinship-path highlighting, land-tract lens, era/census slider, SVG export, copy citation, Ancestry/FamilySearch links, and inline artifact preview.
    - `genealogy kinship <ID1> <ID2>` / `genealogy collapse <ID>` — Trace all distinct blood paths, Wright's $r$ / $F$, and pedigree collapse across inosculated families.
+   - `genealogy constraints [--person ID] [--status STATUS]` — Evaluate deductive relationship constraints (e.g., marriage dispensations) to identify common ancestors, narrow candidates, and flag identity overlaps or contradictions.
    - `genealogy tracts [--tract FILTER]` — Display chronological chain-of-title tables grouped by land tract.
    - `genealogy dna <ID1> <ID2> [--observed-cm CM]` — Endogamy-aware autosomal DNA expected shared cM corroboration across all documented blood paths.
    - `genealogy gaps` — Audit missing U.S. Federal Censuses (1790–1950, excluding 1890), promotion-ready profiles, discrepancies, consanguineous marriages, and excluded leads.

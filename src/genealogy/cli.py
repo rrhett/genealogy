@@ -28,6 +28,7 @@ from genealogy.apis.wikitree import (
     get_wikitree_profile,
     search_wikitree_person,
 )
+from genealogy.constraints import evaluate_all_constraints
 from genealogy.db import build_sqlite, run_sql_query, search_fts
 from genealogy.gedcom import export_gedcom, import_gedcom
 from genealogy.intake import (
@@ -523,6 +524,43 @@ def _cmd_collapse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_constraints(args: argparse.Namespace) -> int:
+    evals = evaluate_all_constraints(
+        args.root,
+        person_id=args.person,
+        status=args.status,
+    )
+    if args.json:
+        print(json.dumps([ev.to_dict() for ev in evals], indent=2))
+        return 0
+    if not evals:
+        print("No matching relationship constraints found.")
+        return 0
+    print(f"Relationship Constraints ({len(evals)}):")
+    for ev in evals:
+        sym = " (symmetric)" if ev.symmetric else ""
+        print(
+            f"\n[{ev.status.upper()}] {ev.constraint_id}: "
+            f"{ev.person_1_name} ({ev.person_1}, steps={ev.steps_1}) <-> "
+            f"{ev.person_2_name} ({ev.person_2}, steps={ev.steps_2}){sym}"
+        )
+        print(
+            f"  Side 1 known ({len(ev.frontier_1.known_ancestors)}), unknown slots: {ev.frontier_1.unknown_slots}"
+        )
+        print(
+            f"  Side 2 known ({len(ev.frontier_2.known_ancestors)}), unknown slots: {ev.frontier_2.unknown_slots}"
+        )
+        for ded in ev.deductions:
+            print(f"  - [{ded.code}] {ded.message}")
+            if ded.suggested_action:
+                print(f"    Action: {ded.suggested_action}")
+        if ev.ruled_out_candidates:
+            print(f"  Ruled out ({len(ev.ruled_out_candidates)}):")
+            for rc in ev.ruled_out_candidates:
+                print(f"    x {rc.candidate_id} ({rc.candidate_name}): {'; '.join(rc.rejection_reasons)}")
+    return 0
+
+
 def _cmd_gaps(args: argparse.Namespace) -> int:
     reg_list = (
         [r.strip().lower() for r in args.regions.split(",") if r.strip()]
@@ -564,6 +602,17 @@ def _cmd_gaps(args: argparse.Namespace) -> int:
         )
         if cm.get("recommended_record"):
             print(f"    Tip: {cm['recommended_record']}")
+
+    if gaps.get("relationship_constraints"):
+        print(f"\nUnresolved Relationship Constraints: {len(gaps['relationship_constraints'])}")
+        for rc in gaps["relationship_constraints"]:
+            print(
+                f"  - [{rc['status'].upper()}] {rc['constraint_id']}: "
+                f"{rc['person_1_name']} (steps={rc['steps_1']}) <-> "
+                f"{rc['person_2_name']} (steps={rc['steps_2']})"
+            )
+            for ded in rc.get("deductions", []):
+                print(f"      * [{ded['code']}] {ded['message']}")
 
     print(f"\nPending Sources: {len(gaps['pending_sources'])} | Excluded Leads: {len(gaps['excluded_sources'])}")
     for ex in gaps["excluded_sources"]:
@@ -1017,6 +1066,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_kin.add_argument("--max-depth", type=int, default=10, help="Max upward generations to search (default: 10)")
     p_kin.add_argument("--json", action="store_true", help="Output JSON")
     p_kin.set_defaults(func=_cmd_kinship)
+
+    # constraints
+    p_con = sub.add_parser("constraints", help="Evaluate relationship constraints (e.g., marriage dispensations) and apply deductive reasoning")
+    p_con.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_con.add_argument("--person", default=None, help="Filter constraints involving this individual ID")
+    p_con.add_argument(
+        "--status",
+        choices=["satisfied", "narrowed", "open", "violated", "not_applicable"],
+        default=None,
+        help="Filter by evaluation status",
+    )
+    p_con.add_argument("--json", action="store_true", help="Output JSON")
+    p_con.set_defaults(func=_cmd_constraints)
 
     # collapse
     p_col = sub.add_parser("collapse", help="Analyze pedigree collapse, multi-path ancestors, and Wright's F")

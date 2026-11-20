@@ -77,6 +77,22 @@ CREATE TABLE relationships (
     notes TEXT NOT NULL
 );
 
+CREATE TABLE relationship_constraints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    constraint_id TEXT,
+    constraint_type TEXT NOT NULL,
+    person_1 TEXT NOT NULL,
+    person_2 TEXT NOT NULL,
+    steps_1 INTEGER NOT NULL,
+    steps_2 INTEGER NOT NULL,
+    symmetric INTEGER NOT NULL,
+    common_ancestor_sex TEXT,
+    common_ancestor_surname TEXT,
+    confidence TEXT NOT NULL,
+    sources_json TEXT NOT NULL,
+    notes TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE fts_records USING fts5(
     entity_type,
     entity_id,
@@ -251,6 +267,31 @@ def _populate_connection(conn: sqlite3.Connection, ds: Dataset) -> None:
                 rel.confidence,
                 json.dumps(rel.sources),
                 rel.notes,
+            ),
+        )
+
+    for idx, con in enumerate(ds.constraints, start=1):
+        conn.execute(
+            """
+            INSERT INTO relationship_constraints (
+                constraint_id, constraint_type, person_1, person_2, steps_1, steps_2,
+                symmetric, common_ancestor_sex, common_ancestor_surname,
+                confidence, sources_json, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                con.id or f"C-{idx:03d}",
+                con.type,
+                con.person_1,
+                con.person_2,
+                con.steps_1,
+                con.steps_2,
+                1 if con.symmetric else 0,
+                con.common_ancestor_sex,
+                con.common_ancestor_surname,
+                con.confidence,
+                json.dumps(con.sources),
+                con.notes,
             ),
         )
 

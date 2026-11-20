@@ -10,6 +10,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+from genealogy.constraints import evaluate_all_constraints
 from genealogy.loader import Dataset, load_dataset
 from genealogy.schema import parse_genealogy_date
 
@@ -762,6 +763,12 @@ def compute_research_gaps(
             )
         consanguineous.append(d_rep)
 
+    constraint_gaps = [
+        ev.to_dict()
+        for ev in evaluate_all_constraints(ds)
+        if ev.status in ("narrowed", "open", "violated")
+    ]
+
     return {
         "root": str(ds.root),
         "census_gaps": census_gaps,
@@ -771,6 +778,7 @@ def compute_research_gaps(
         "pending_sources": pending_sources,
         "excluded_sources": excluded_sources,
         "consanguineous_marriages": consanguineous,
+        "relationship_constraints": constraint_gaps,
     }
 
 
@@ -916,6 +924,19 @@ def build_family_report_markdown(
             lines.append(
                 f"- **`{ex.id}`** — {ex.title}: {ex.exclusion_reason or 'Ruled out as unrelated'}"
             )
+
+    con_evals = evaluate_all_constraints(ds, person_id=individual_id)
+    if con_evals:
+        lines.extend(["", "## Relationship Constraints & Deductions"])
+        for ev in con_evals:
+            other_id = ev.person_2 if ev.person_1 == individual_id else ev.person_1
+            other_name = ev.person_2_name if ev.person_1 == individual_id else ev.person_1_name
+            lines.append(
+                f"- **`{ev.constraint_id}`** (`{ev.status}`, {ev.type}) with **{other_name}** (`{other_id}`, "
+                f"steps {ev.steps_1}/{ev.steps_2})"
+            )
+            for ded in ev.deductions:
+                lines.append(f"  - [{ded.code}] {ded.message}")
 
     lines.extend(["", "## Sources & Provenance Links"])
     if cited_sids:
