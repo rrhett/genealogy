@@ -225,6 +225,23 @@ git commit -m "Transcribe 1895 Lagos de Moreno baptism and update Garcia branch"
 git push
 ```
 
+### 6. Managing Chats, Context & Quota (When to Start a New Chat)
+Unlike a web chat where the conversation thread *is* your memory, here **your Git repository (`data/`, `artifacts/`, and `workspace/`) is your permanent memory**. Keeping one giant Antigravity chat open for weeks wastes quota (every new message re-sends the entire chat history and old scan transcriptions) and degrades accuracy as the context window fills up.
+
+**Rule of thumb: One chat = one focused research session, one ancestor/branch, or one small batch of records.**
+
+**Start a new chat when:**
+- **You start a new day or research session:** Open a fresh chat and run `/status`. It reads `workspace/` and `genealogy stats` / `gaps` in seconds, giving the agent exact, up-to-date context at a fraction of the quota.
+- **You switch to a different ancestor, branch, or brick wall:** Mixing unrelated families in one thread clutters context and risks cross-contaminating hypotheses.
+- **You finish a heavy batch of scans:** After `/ingest`-ing ~3–5 scans or multi-page PDFs, image/transcription tokens add up quickly. Run `/wrap-up`, commit, and start a fresh chat for the next batch or analysis.
+- **You've reached ~15–25 back-and-forth turns** (or the agent starts forgetting earlier details): Run `/wrap-up` to save open questions and next steps to `workspace/`, then continue in a new chat.
+- **Right after `/wrap-up`:** Treat `/wrap-up` as the natural closing step for a chat.
+
+**Stay in the same chat when:**
+- You are doing tightly connected follow-ups on the **same person, family, or record** (e.g., running `/ingest` on a scan, spotting a discrepancy, running `/exclude` or `genealogy timeline`, and updating `workspace/HYPOTHESES.md`).
+
+> **Tip:** When starting a new chat for a specific person, mention their ID or file path (e.g., *"Let's work on `I0042`"* or *"Check `artifacts/1895_bautismo_garcia.jpg`"*). Combined with `/status`, the agent jumps straight to the right records without re-reading your whole tree.
+
 ---
 
 ## CLI Reference (`genealogy ...`)
