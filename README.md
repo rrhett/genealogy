@@ -234,3 +234,11 @@ uv run ruff check src tests plugin/hooks
 uv run pytest -v
 agy plugin validate plugin --strict
 ```
+
+---
+
+## License
+
+This toolkit and plugin are licensed under the **GNU General Public License v3.0 or later (`GPL-3.0-or-later`)**—see [LICENSE](LICENSE).
+
+**Your family history is 100% yours:** Under the GPLv3 Section 7 exception in [LICENSE-EXCEPTION.md](LICENSE-EXCEPTION.md), your private research data (`data/`, `artifacts/`, `notes/`, `workspace/`, `AGENTS.local.md`) and any files you export or share with relatives (standalone `genealogy view --out` HTML trees, SVGs, GEDCOMs, SQLite databases, and Family Group Sheet reports) carry **no GPL obligations**—keep them private or share them under whatever terms you choose.
