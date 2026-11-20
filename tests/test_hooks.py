@@ -38,16 +38,37 @@ def test_hooks_json_is_valid() -> None:
     assert "validate-data-on-stop" in hooks_cfg
 
 
-def test_guard_boundaries_blocks_artifacts_and_asks_on_notes() -> None:
+def test_guard_boundaries_blocks_artifacts_and_asks_on_notes(tmp_path: Path) -> None:
+    # Unrelated non-genealogy software repo -> hook is a no-op (allows writes to build artifacts/)
+    software_repo = tmp_path / "software_app"
+    software_repo.mkdir()
+    res_non_gen = _run_hook(
+        GUARD_SCRIPT,
+        {
+            "workspacePaths": [str(software_repo)],
+            "cwd": str(software_repo),
+            "toolCall": {
+                "name": "write_file",
+                "args": {"Path": str(software_repo / "artifacts" / "bundle.js")},
+            },
+        },
+    )
+    assert res_non_gen["decision"] == "allow"
+
+    # Genealogy workspace -> enforces artifacts/ (deny) and notes/ (ask)
+    gen_repo = tmp_path / "family_repo"
+    (gen_repo / "data").mkdir(parents=True)
+    (gen_repo / "data" / "relationships.yaml").write_text("relationships: []\n", encoding="utf-8")
+
     # Direct write to artifacts/ -> deny
     res = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "write_file",
-                "args": {"Path": str(REPO_ROOT / "artifacts" / "scan.png")},
+                "args": {"Path": str(gen_repo / "artifacts" / "scan.png")},
             },
         },
     )
@@ -57,25 +78,25 @@ def test_guard_boundaries_blocks_artifacts_and_asks_on_notes() -> None:
     res_notes = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "edit_file",
-                "args": {"Path": str(REPO_ROOT / "notes" / "lore.md")},
+                "args": {"Path": str(gen_repo / "notes" / "lore.md")},
             },
         },
     )
     assert res_notes["decision"] == "ask"
 
-    # Write to data/ or examples/west-family/artifacts/ -> allow
+    # Write to data/ -> allow
     res_data = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "write_file",
-                "args": {"Path": str(REPO_ROOT / "data" / "sources" / "S-1900-CENSUS.md")},
+                "args": {"Path": str(gen_repo / "data" / "sources" / "S-1900-CENSUS.md")},
             },
         },
     )
@@ -85,8 +106,8 @@ def test_guard_boundaries_blocks_artifacts_and_asks_on_notes() -> None:
     res_rm = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "run_command",
                 "args": {"CommandLine": "rm -f artifacts/census.jpg"},
@@ -98,8 +119,8 @@ def test_guard_boundaries_blocks_artifacts_and_asks_on_notes() -> None:
     res_ls = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "run_command",
                 "args": {"CommandLine": "ls -la artifacts/"},
@@ -111,8 +132,8 @@ def test_guard_boundaries_blocks_artifacts_and_asks_on_notes() -> None:
     res_touch = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "run_command",
                 "args": {"CommandLine": "touch artifacts/new.png"},
@@ -125,8 +146,8 @@ def test_guard_boundaries_blocks_artifacts_and_asks_on_notes() -> None:
     res_example_rm = _run_hook(
         GUARD_SCRIPT,
         {
-            "workspacePaths": [str(REPO_ROOT)],
-            "cwd": str(REPO_ROOT),
+            "workspacePaths": [str(gen_repo)],
+            "cwd": str(gen_repo),
             "toolCall": {
                 "name": "run_command",
                 "args": {"CommandLine": "rm -f examples/west-family/artifacts/temp.txt"},

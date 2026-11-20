@@ -78,7 +78,32 @@ genealogy upgrade-workspace
 **Safety guarantee:** `genealogy upgrade-workspace` updates *only* `AGENTS.md`, `.agents/skills/`, `.agents/hooks/`, and the version stamp in `.genealogy.yaml`. It **never** modifies `data/`, `artifacts/`, `notes/`, `workspace/`, `README.md`, or `AGENTS.local.md`. Put any family-specific rules, surname lists, or privacy notes in `AGENTS.local.md`.
 
 ### Optional: Native Antigravity Plugin Mode
-The `plugin/` folder in this repository is also a validated native Antigravity plugin (`agy plugin validate plugin --strict`). If you install it globally in Antigravity instead of embedding `.agents/` inside each family repo, pass `--plugin-only` to `genealogy init` (or `genealogy upgrade-workspace --plugin-only`).
+For almost everyone, **default `genealogy init` (embedded per-workspace mode) is recommended**: it scopes `AGENTS.md`, skills, and hooks strictly to `~/my-family-history` so they never bleed into unrelated coding projects, while still upgrading cleanly via `genealogy upgrade-workspace`.
+
+If you prefer loading `plugin/` directly as a native Antigravity plugin (with `genealogy init --plugin-only`), you have two options:
+
+1. **Per-Workspace Plugin Pointer (Recommended if using plugin mode):**
+   Clone this toolkit repo locally (e.g. `~/src/genealogy`), then create `~/my-family-history/.agents/plugins.json`:
+   ```json
+   {
+     "entries": [
+       { "path": "~/src/genealogy/plugin" }
+     ]
+   }
+   ```
+   Antigravity loads `genealogy-research` *only* when you open `~/my-family-history`.
+
+2. **Global Plugin Install:**
+   ```bash
+   # From a local clone of this toolkit repo:
+   agy plugin install ./plugin
+   ```
+   > **Important:** Because Antigravity loads a plugin's `rules/AGENTS.md` unconditionally whenever the plugin is enabled (unlike skills, which load on demand), toggle it off when working in unrelated coding projects:
+   > ```bash
+   > agy plugin disable genealogy-research   # when working on non-genealogy repos
+   > agy plugin enable genealogy-research    # when doing genealogy research
+   > ```
+   > *(The boundary hook itself checks for `.genealogy.yaml` or `data/relationships.yaml`, so it will never block writes in non-genealogy repos.)*
 
 ---
 

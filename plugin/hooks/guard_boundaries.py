@@ -52,8 +52,20 @@ def _is_under(target: Path, parent: Path) -> bool:
         return False
 
 
+def _is_genealogy_workspace(root: Path) -> bool:
+    """Return True only when the workspace looks like a genealogy repository."""
+    return (
+        (root / ".genealogy.yaml").is_file()
+        or (root / "data" / "relationships.yaml").is_file()
+        or (root / "data" / "individuals").is_dir()
+    )
+
+
 def evaluate(payload: dict) -> dict[str, str]:
     root = _repo_root(payload)
+    if not _is_genealogy_workspace(root):
+        return {"decision": "allow"}
+
     artifacts_dirs = [root / "artifacts"]
     custom_art = _configured_artifacts_dir(root)
     if custom_art and custom_art not in artifacts_dirs:
