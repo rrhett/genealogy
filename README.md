@@ -40,15 +40,33 @@ genealogy --version
 Run `genealogy init` to create a clean, standalone Git repository pre-wired with `data/`, `artifacts/`, `notes/`, `workspace/`, `AGENTS.md`, `AGENTS.local.md`, skills, hooks, and CI:
 
 ```bash
-# Standard setup (embeds AGENTS.md, skills & hooks so any AI agent picks them up)
+# Standard setup (embeds AGENTS.md, skills & hooks; auto-detects region profiles per person)
 genealogy init ~/my-family-history
 
-# Optional: enable Git LFS for large PDF/PNG/TIFF scans in artifacts/
+# Optional: set explicit regional record profiles (auto, mexico, us, uk, canada, general)
+genealogy init ~/my-family-history --regions mexico,us
+
+# Optional: enable Git LFS for medium scan libraries (1–8 GB; GitHub Free includes 10 GiB/mo)
 genealogy init ~/my-family-history --lfs
 
-# Optional: store multi-GB scans outside Git (e.g. Dropbox/iCloud/NAS) while Git tracks SHA-256 hashes
+# Optional: store multi-GB scans outside Git (Dropbox/iCloud/NAS) while Git tracks SHA-256 hashes
 genealogy init ~/my-family-history --artifacts-dir ~/Dropbox/FamilyScans
 ```
+
+### Choosing Artifact Storage: Plain Git vs. Git LFS vs. External Folder
+
+| Strategy | Best For | Tradeoffs |
+| :--- | :--- | :--- |
+| **Plain Git (`artifacts/` in repo)** | **< ~500 MB–1 GB** (e.g., hundreds of standard Ancestry/FamilySearch JPGs/PDFs) | Zero extra setup; single backup; stays well below GitHub's 100 MB per-file cap. |
+| **Git LFS (`--lfs`)** | **1–8 GB** in one GitHub backup | GitHub Free includes **10 GiB storage + 10 GiB bandwidth/month** (up to 2 GB/file). Generated CI automatically passes `--skip-artifacts` so Actions doesn't burn LFS bandwidth; `genealogy validate` also verifies SHA-256 hashes directly from LFS pointers! |
+| **External Folder (`--artifacts-dir`)** | **> 8 GB**, raw photo albums, or easy phone/Finder browsing via Dropbox/iCloud/Google Drive | Keeps the Git repo tiny (< 5 MB) forever while `data/sources/` keeps portable `artifacts/...` paths and SHA-256 integrity checks. You can move `artifacts/` out at any time by setting `artifacts_dir` in `.genealogy.yaml`. |
+
+### International & Mexican Genealogy Support
+This toolkit is designed for international and binational research—not just U.S. censuses:
+* **Region-Aware Record Gaps (`regions: [auto]`):** Automatically detects each individual's region(s) from their places (or respects `regions:` in `.genealogy.yaml` / `genealogy gaps --regions mexico,us`). Mexican lines check **Catholic Parish Registers** (*Bautismos*, *Matrimonios*, *Defunciones*), ***Registro Civil*** (1859+), the **1930 Mexican National Census**, and flag consanguineous couples to search diocesan ***Dispensas Matrimoniales***—without spamming irrelevant U.S. census gaps!
+* **Hispanic Double Surnames & Accents:** Individuals support optional `given_name`, `surname` (*apellido paterno*), and `maternal_surname` (*apellido materno*) with automatic ASCII ID transliteration (`José García López` → `I-GARCIA-JOSE-1870`) and accurate GEDCOM `Given /García López/` formatting.
+* **Colonial-Era Viewer Range:** The interactive viewer's Era Slider adapts automatically to your dataset's date span (supporting 1600s–1960s colonial parish lineages) and applies census badges only for each individual's applicable regional census years.
+* **Mexican & Hispanic Transcription Guide:** Bundled in `plugin/skills/artifact-transcription/references/mexican-hispanic-records.md` covering bilingual transcription, *abuelos*, *padrinos*, *dispensas matrimoniales*, and Spanish/Latin paleography abbreviations.
 
 Commit your fresh workspace and connect it to a **private** GitHub (or GitLab) repository:
 ```bash
@@ -152,9 +170,9 @@ Use the bundled **`gedcom-triage`** skill to audit staged records for living-per
 
 | Command | Purpose |
 | :--- | :--- |
-| `genealogy init [DIR] [--lfs] [--artifacts-dir PATH] [--plugin-only]` | Bootstraps a fresh, private family-history Git repo separated from the Python toolkit. |
+| `genealogy init [DIR] [--regions auto\|mexico,us] [--lfs] [--artifacts-dir PATH] [--plugin-only]` | Bootstraps a fresh, private family-history Git repo separated from the Python toolkit. |
 | `genealogy upgrade-workspace [--dry-run] [--root DIR]` | Refreshes managed `AGENTS.md`, skills, and hooks after `uv tool upgrade genealogy-workspace` without touching user data. |
-| `genealogy validate [--root DIR] [--strict] [--json]` | Validates YAML schemas, IDs, referential integrity, artifact SHA-256 hashes, `parent_child` DAG acyclicity, biological/chronological sanity, excluded-lead guardrails, and GPS sourcing rules. |
+| `genealogy validate [--root DIR] [--strict] [--skip-artifacts] [--json]` | Validates YAML schemas, IDs, referential integrity, artifact SHA-256 hashes (including Git LFS pointers!), `parent_child` DAG acyclicity, biological/chronological sanity, excluded-lead guardrails, and GPS sourcing rules. |
 | `genealogy intake [--root DIR] [--scaffold] [--url URL] [--dry-run]` | Scans `artifacts/` (or configured `artifacts_dir`), computes SHA-256 checksums, flags duplicate downloads of **previously excluded leads**, and scaffolds starter `data/sources/` stubs (optionally auto-parsing `--url` into `links:`). |
 | `genealogy add-link <SOURCE_ID> <URL> [--note TEXT]` | Auto-parses an Ancestry, FamilySearch, Newspapers.com, Find a Grave, Fold3, LoC, NARA, or WikiTree URL and appends it to `data/sources/<SOURCE_ID>.md` with `provider`, `requires_auth`, `accessed`, and extracted record IDs. |
 | `genealogy stats [--root DIR] [--json]` | Displays dataset counts (individuals by status/living, sources by type, relationships, linked vs. unlinked artifacts). |
@@ -167,7 +185,7 @@ Use the bundled **`gedcom-triage`** skill to audit staged records for living-per
 | `genealogy collapse <ID> [--max-gen N] [--json]` | Reports per-generation pedigree collapse, multi-path ancestors (`×2`, `×3`…), and Wright's inbreeding coefficient ($F$). |
 | `genealogy tracts [--tract FILTER] [--json]` | Prints chronological chain-of-title tables grouped by land tract across deeds and probate events. |
 | `genealogy dna <ID1> <ID2> [--observed-cm CM] [--json]` | Endogamy-aware autosomal DNA expected shared cM calculator across all documented blood paths, flagging `higher_than_expected`, `lower_than_expected`, or `unexplained_match` results. |
-| `genealogy gaps [--json]` | Audits missing U.S. Federal Censuses (1790–1950, skipping 1890), promotion-ready `tentative` profiles, recorded discrepancies, consanguineous marriages, and excluded leads. |
+| `genealogy gaps [--regions LIST] [--json]` | Audits region-aware missing censuses (U.S., Mexico 1930, UK, Canada) and Mexican parish/civil vital gaps, promotion-ready `tentative` profiles, discrepancies, consanguineous marriages (with *Dispensa Matrimonial* tips), and excluded leads. |
 | `genealogy report <ID> [--out PATH] [--include-living]` | Generates a shareable Markdown Family Group Sheet & Research Dossier with numbered citations, provenance links, excluded leads, and living-person redaction. |
 | `genealogy import-gedcom <file> [--dest staging\|data]` | Imports GEDCOM 5.5.1 or 7.0 into `workspace/staging/` (default) or `data/`, preserving GPS provenance. |
 | `genealogy export-gedcom <out> [--version 7.0\|5.5.1] [--include-living]` | Exports `data/` to GEDCOM 7.0 (default) or 5.5.1. **Living individuals (`living: true`) are automatically redacted by default.** |

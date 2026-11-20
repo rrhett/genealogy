@@ -32,7 +32,9 @@ Optionally use `genealogy intake --scaffold` to generate starter source stubs, t
 Read the image or PDF directly from `artifacts/` (via vision/file reading) and check `notes/` for any existing user context about the scan.
 
 - If the artifact is a U.S. Federal Census page (1790–1950), consult [U.S. Federal Census Columns Reference](./references/us-census-columns.md) to verify official Census Day, column meanings, and special notations (e.g., 1900 children born/living, 1910 `M1`/`M2`, 1940 circled-`x` informant, 1950 sample lines).
-- Record sheet/page number, enumeration district (ED), ward/civil district, dwelling number, family number, line numbers, enumeration date, and enumerator name when visible.
+- If the artifact is a Mexican or Hispanic church, civil, or colonial document (*Bautismo*, *Matrimonio*, *Defunción*, *Información/Dispensa Matrimonial*, *Registro Civil*, 1930 Mexican Census), consult [Mexican & Hispanic Records Reference](./references/mexican-hispanic-records.md) for double surnames, grandparents (*abuelos*), godparents (*padrinos*), Spanish/Latin abbreviations, and bilingual transcription rules.
+- For non-English records, always record the **verbatim original-language transcription first** followed by a faithful English translation.
+- Record sheet/page/folio/libro/acta number, parish or civil registry office, enumeration district (ED), dwelling/family/line numbers, record date, and clerk/priest/enumerator name when visible.
 
 ### 3. Transcribe Verbatim Using Standard Editorial Conventions
 Draft tricky or faded transcriptions in `workspace/` first if needed, then write the finalized transcription into `data/sources/<SOURCE_ID>.md`.

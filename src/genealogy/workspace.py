@@ -108,7 +108,13 @@ This refreshes `AGENTS.md` and `.agents/` without ever touching `data/`, `artifa
 """
 
 
-def _render_user_ci_workflow(ci_repo: str) -> str:
+def _render_user_ci_workflow(ci_repo: str, *, skip_artifacts: bool = False) -> str:
+    extra_flag = " --skip-artifacts" if skip_artifacts else ""
+    note = (
+        "        # --skip-artifacts avoids burning Git LFS bandwidth or failing when scans live in an external folder\n"
+        if skip_artifacts
+        else ""
+    )
     return f"""\
 name: Validate Family History Data
 
@@ -128,8 +134,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Validate data/
-        # Replace the URL below with your published genealogy toolkit repository URL
-        run: uvx --from "{ci_repo}" genealogy validate
+{note}        run: uvx --from "{ci_repo}" genealogy validate{extra_flag}
 """
 
 
@@ -250,6 +255,7 @@ def init_workspace(
     git_init: bool = True,
     use_lfs: bool = False,
     artifacts_dir: str | None = None,
+    regions: list[str] | None = None,
     plugin_only: bool = False,
     ci_repo: str | None = None,
 ) -> SyncReport:
@@ -291,7 +297,10 @@ def init_workspace(
     _write_if_missing("README.md", _USER_README)
     _write_if_missing(
         ".github/workflows/validate.yml",
-        _render_user_ci_workflow(ci_repo or DEFAULT_TOOLKIT_REPO_URL),
+        _render_user_ci_workflow(
+            ci_repo or DEFAULT_TOOLKIT_REPO_URL,
+            skip_artifacts=bool(use_lfs or artifacts_dir),
+        ),
     )
     if use_lfs:
         _write_if_missing(".gitattributes", _USER_GITATTRIBUTES_LFS)
@@ -300,6 +309,7 @@ def init_workspace(
     agent_mode = "plugin" if plugin_only else "embedded"
     cfg["toolkit_version"] = __version__
     cfg["agent_mode"] = agent_mode
+    cfg["regions"] = regions if regions else ["auto"]
     if artifacts_dir:
         cfg["artifacts_dir"] = artifacts_dir
     _write_config(root, cfg)

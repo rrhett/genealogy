@@ -15,12 +15,13 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from genealogy.analysis import (
-    US_CENSUS_YEARS,
+    REGIONAL_CENSUS_YEARS,
     _canonical_tract_group,
     _extract_discrepancy_bullets,
     compute_kinship,
     compute_land_tracts,
     compute_pedigree_collapse,
+    detect_individual_regions,
     find_consanguineous_marriages,
 )
 from genealogy.loader import Dataset, load_dataset
@@ -399,6 +400,11 @@ def build_viewer_payload(
                 if sd and sd.year_min:
                     covered_censuses.add(sd.year_min)
 
+        ind_regions = detect_individual_regions(ds, iid)
+        applicable_censuses: set[int] = set()
+        for reg in ind_regions:
+            applicable_censuses.update(REGIONAL_CENSUS_YEARS.get(reg, []))
+
         ind_tracts = sorted({_canonical_tract_group(ev.tract) for ev in d.events if ev.tract and ev.tract.strip()})
 
         if redact_living and d.living:
@@ -415,6 +421,8 @@ def build_viewer_payload(
                 "death": None,
                 "birth_year": None,
                 "death_year": None,
+                "regions": ind_regions,
+                "applicable_census_years": sorted(applicable_censuses),
                 "covered_census_years": [],
                 "tracts": [],
                 "events": [],
@@ -440,6 +448,8 @@ def build_viewer_payload(
                 "death": d.death.model_dump() if d.death else None,
                 "birth_year": b_year,
                 "death_year": d_year,
+                "regions": ind_regions,
+                "applicable_census_years": sorted(applicable_censuses),
                 "covered_census_years": sorted(covered_censuses),
                 "tracts": ind_tracts,
                 "events": [ev.model_dump() for ev in d.events],
@@ -489,12 +499,27 @@ def build_viewer_payload(
                     entry["primary_name"] = "Living (Redacted)"
                 entry["description"] = scrub(entry["description"])
 
+    # Compute dynamic era slider bounds from dataset years (supports colonial 1600s trees!)
+    all_years = [
+        y
+        for ind in individuals_out.values()
+        for y in (ind["birth_year"], ind["death_year"])
+        if isinstance(y, int)
+    ]
+    era_min = max(1500, ((min(all_years) // 10) * 10)) if all_years else 1790
+    era_max = min(2020, max(1950, ((max(all_years) // 10) + 1) * 10)) if all_years else 1960
+    all_applicable_censuses = sorted(
+        {y for ind in individuals_out.values() for y in ind.get("applicable_census_years", [])}
+    )
+
     return {
         "meta": {
             "workspace_name": ds.root.name,
             "generated_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             "redact_living": redact_living,
-            "us_census_years": US_CENSUS_YEARS,
+            "era_min": era_min,
+            "era_max": era_max,
+            "census_years": all_applicable_censuses,
             "counts": {
                 "individuals": len(ds.individuals),
                 "sources": len(ds.sources),
@@ -1374,10 +1399,8 @@ function renderGraph() {
   const visible = getVisibleIds();
   const searchMatches = getSearchMatches();
   const tractMatches = getTractMatchSet();
-  const usCensusSet = new Set(data.meta.us_census_years || []);
   const eraActive = state.eraEnabled;
   const eraYear = state.eraYear;
-  const isCensusYear = eraActive && usCensusSet.has(eraYear);
   const { pathNodes, pathPairs, multiPathBadges } = getHighlightedSets();
   const hasHighlight = pathNodes.size > 0;
 
@@ -1525,8 +1548,9 @@ function renderGraph() {
       g.appendChild(bg);
     }
 
-    // Era / Census coverage badge when Era slider is active on a U.S. Census year
-    if (isCensusYear && aliveNow) {
+    // Era / Regional census coverage badge (only when eraYear is an applicable census year for THIS individual's region!)
+    const indApplicableCensuses = ind.applicable_census_years || [];
+    if (eraActive && aliveNow && indApplicableCensuses.includes(eraYear)) {
       const hasCensus = (ind.covered_census_years || []).includes(eraYear);
       const cBadge = svgEl("g", {
         class: hasCensus ? "badge-census-ok" : "badge-census-miss",
@@ -2088,6 +2112,17 @@ function initToolbar() {
   const eraCheck = document.getElementById("era-enabled");
   const eraSlider = document.getElementById("era-slider");
   const eraLabel = document.getElementById("era-year-label");
+  const configureEraBounds = () => {
+    const eMin = state.data.meta.era_min ?? 1790;
+    const eMax = state.data.meta.era_max ?? 1960;
+    eraSlider.min = String(eMin);
+    eraSlider.max = String(eMax);
+    const cur = parseInt(eraSlider.value, 10);
+    if (cur < eMin || cur > eMax) {
+      eraSlider.value = String(Math.min(eMax, Math.max(eMin, 1910)));
+    }
+  };
+  configureEraBounds();
   const syncEra = () => {
     state.eraEnabled = eraCheck.checked;
     state.eraYear = parseInt(eraSlider.value, 10);
@@ -2096,9 +2131,9 @@ function initToolbar() {
       eraLabel.textContent = "Off";
       eraSlider.setAttribute("aria-valuetext", "Era filter disabled");
     } else {
-      const isCen = (state.data.meta.us_census_years || []).includes(state.eraYear);
+      const isCen = (state.data.meta.census_years || []).includes(state.eraYear);
       eraLabel.textContent = String(state.eraYear);
-      eraSlider.setAttribute("aria-valuetext", isCen ? `Year ${state.eraYear} (U.S. Census year)` : `Year ${state.eraYear}`);
+      eraSlider.setAttribute("aria-valuetext", isCen ? `Year ${state.eraYear} (National census year)` : `Year ${state.eraYear}`);
     }
     renderGraph();
   };

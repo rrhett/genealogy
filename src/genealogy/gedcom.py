@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -136,34 +137,58 @@ def gedcom_date_to_iso(raw: str | None) -> str | None:
 
 
 def _clean_token(text: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").upper()
+    """Normalize accented/Unicode characters (e.g., García -> GARCIA) into ASCII ID tokens."""
+    ascii_text = (
+        unicodedata.normalize("NFKD", text)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", ascii_text).strip("-").upper()
     return cleaned or "UNKNOWN"
 
 
-def _parse_gedcom_name(raw_name: str) -> tuple[str, str, str]:
-    """Return (primary_name, surname_token, given_token) from a GEDCOM NAME value."""
+def _parse_gedcom_name(raw_name: str) -> tuple[str, str, str, str | None, str | None, str | None]:
+    """Return (primary_name, surname_tok, given_tok, given_name, surname, maternal_surname).
+
+    Handles Hispanic/compound slash surnames such as `Juan /García López/` so the
+    paternal surname (`García`) anchors the ID token while preserving both surnames.
+    """
     m = re.search(r"/([^/]*)/", raw_name)
     if m:
-        surname = m.group(1).strip()
+        raw_surname = m.group(1).strip()
         given = (raw_name[: m.start()] + " " + raw_name[m.end() :]).strip()
         given = re.sub(r"\s+", " ", given)
     else:
         parts = raw_name.strip().split()
         if len(parts) >= 2:
-            surname = parts[-1]
+            raw_surname = parts[-1]
             given = " ".join(parts[:-1])
         elif len(parts) == 1:
-            surname = parts[0]
-            given = "UNKNOWN"
+            raw_surname = parts[0]
+            given = ""
         else:
-            surname = "UNKNOWN"
-            given = "UNKNOWN"
+            raw_surname = ""
+            given = ""
 
-    primary = " ".join(p for p in (given, surname) if p and p != "UNKNOWN").strip()
-    if not primary:
-        primary = "Unknown"
+    surname_parts = raw_surname.split()
+    paternal: str | None = None
+    maternal: str | None = None
+    if len(surname_parts) == 2 and surname_parts[0].lower() not in {"de", "del", "la", "las", "los", "san", "santa", "van", "von", "mc", "mac"}:
+        paternal, maternal = surname_parts[0], surname_parts[1]
+    elif raw_surname:
+        paternal = raw_surname
+
+    primary = " ".join(p for p in (given, raw_surname) if p).strip() or "Unknown"
     given_first = given.split()[0] if given else "UNKNOWN"
-    return primary, _clean_token(surname), _clean_token(given_first)
+    id_surname = paternal or raw_surname or "UNKNOWN"
+    return (
+        primary,
+        _clean_token(id_surname),
+        _clean_token(given_first),
+        given or None,
+        paternal,
+        maternal,
+    )
 
 
 def _extract_year(date_str: str | None) -> str:
@@ -223,14 +248,18 @@ def import_gedcom(
     fam_nodes = [n for n in nodes if n.tag == "FAM"]
 
     # First pass: assign deterministic IDs
-    parsed_indis: list[tuple[GedcomNode, str, str, list[str]]] = []
+    parsed_indis: list[
+        tuple[GedcomNode, str, str, list[str], str | None, str | None, str | None]
+    ] = []
     for n in indi_nodes:
         name_nodes = n.find_all("NAME")
         raw_primary = name_nodes[0].value if name_nodes else "Unknown /Unknown/"
-        primary_name, surname_tok, given_tok = _parse_gedcom_name(raw_primary)
+        primary_name, surname_tok, given_tok, given_val, pat_val, mat_val = _parse_gedcom_name(
+            raw_primary
+        )
         variants = []
         for extra_name in name_nodes[1:]:
-            v_name, _, _ = _parse_gedcom_name(extra_name.value)
+            v_name, *_ = _parse_gedcom_name(extra_name.value)
             if v_name != primary_name and v_name not in variants:
                 variants.append(v_name)
 
@@ -248,7 +277,7 @@ def import_gedcom(
         used_ids.add(cid)
         assert n.xref is not None
         xref_to_id[n.xref] = cid
-        parsed_indis.append((n, cid, primary_name, variants))
+        parsed_indis.append((n, cid, primary_name, variants, given_val, pat_val, mat_val))
 
     # Write individual files
     event_tag_map = {
@@ -265,7 +294,7 @@ def import_gedcom(
     }
 
     cited_individuals: list[str] = []
-    for n, cid, primary_name, variants in parsed_indis:
+    for n, cid, primary_name, variants, given_val, pat_val, mat_val in parsed_indis:
         sex_node = n.find_first("SEX")
         sex = sex_node.value.strip().upper() if sex_node else "U"
         if sex not in {"M", "F", "X", "U"}:
@@ -274,10 +303,16 @@ def import_gedcom(
         meta: dict[str, Any] = {
             "id": cid,
             "primary_name": primary_name,
-            "name_variants": variants,
-            "sex": sex,
-            "living": False,
         }
+        if given_val:
+            meta["given_name"] = given_val
+        if pat_val:
+            meta["surname"] = pat_val
+        if mat_val:
+            meta["maternal_surname"] = mat_val
+        meta["name_variants"] = variants
+        meta["sex"] = sex
+        meta["living"] = False
 
         birt = n.find_first("BIRT")
         if birt:
@@ -454,7 +489,27 @@ def import_gedcom(
     )
 
 
-def _format_gedcom_name(primary_name: str) -> str:
+def _format_gedcom_name(
+    primary_name: str,
+    *,
+    given_name: str | None = None,
+    surname: str | None = None,
+    maternal_surname: str | None = None,
+) -> str:
+    """Format a name in GEDCOM `Given /Surname/` syntax, preserving Hispanic double surnames."""
+    if surname or maternal_surname:
+        full_surname = " ".join(p for p in (surname, maternal_surname) if p).strip()
+        given = given_name
+        if not given:
+            # Strip trailing surname tokens from primary_name to derive given name
+            if full_surname and primary_name.endswith(full_surname):
+                given = primary_name[: -len(full_surname)].strip()
+            else:
+                given = primary_name.replace(full_surname, "").strip()
+        if given and full_surname:
+            return f"{given} /{full_surname}/"
+        if full_surname:
+            return f"/{full_surname}/"
     parts = primary_name.strip().split()
     if len(parts) >= 2:
         return f"{' '.join(parts[:-1])} /{parts[-1]}/"
@@ -563,7 +618,9 @@ def export_gedcom(
             lines.append("1 SEX U")
             lines.append("1 NOTE Redacted (living individual)")
         else:
-            lines.append(f"1 NAME {_format_gedcom_name(ind.primary_name)}")
+            lines.append(
+                f"1 NAME {_format_gedcom_name(ind.primary_name, given_name=ind.given_name, surname=ind.surname, maternal_surname=ind.maternal_surname)}"
+            )
             for variant in ind.name_variants:
                 lines.append(f"1 NAME {_format_gedcom_name(variant)}")
             lines.append(f"1 SEX {ind.sex}")

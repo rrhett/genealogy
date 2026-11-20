@@ -75,6 +75,24 @@ def compute_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _parse_lfs_pointer_sha256(path: Path) -> str | None:
+    """If `path` is a Git LFS pointer file, return its `oid sha256:` hex digest; else None."""
+    try:
+        if path.stat().st_size > 1024:
+            return None
+        text = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("version https://git-lfs.github.com/spec/v1"):
+        return None
+    for line in text.splitlines():
+        if line.startswith("oid sha256:"):
+            digest = line.split(":", 1)[1].strip().lower()
+            if len(digest) == 64:
+                return digest
+    return None
+
+
 def _rel(path: Path, root: Path) -> str:
     try:
         return str(path.relative_to(root))
@@ -82,13 +100,13 @@ def _rel(path: Path, root: Path) -> str:
         return str(path)
 
 
-def validate_dataset(root: Path | str) -> ValidationReport:
+def validate_dataset(root: Path | str, *, skip_artifacts: bool = False) -> ValidationReport:
     """Run all validation checks against a genealogy workspace root."""
     ds = load_dataset(root)
-    return validate_loaded_dataset(ds)
+    return validate_loaded_dataset(ds, skip_artifacts=skip_artifacts)
 
 
-def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
+def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> ValidationReport:
     """Validate an already-loaded Dataset."""
     report = ValidationReport(
         root=ds.root,
@@ -240,7 +258,7 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
                 src.path,
             )
 
-        if src.data.artifact_path:
+        if src.data.artifact_path and not skip_artifacts:
             art_file = ds.resolve_artifact_path(src.data.artifact_path)
             if not art_file.exists():
                 add_error(
@@ -251,7 +269,8 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
             else:
                 linked_artifacts.add(art_file)
                 if src.data.artifact_sha256:
-                    actual_sha = compute_sha256(art_file)
+                    lfs_sha = _parse_lfs_pointer_sha256(art_file)
+                    actual_sha = lfs_sha if lfs_sha is not None else compute_sha256(art_file)
                     if actual_sha != src.data.artifact_sha256:
                         add_error(
                             "ARTIFACT_HASH_MISMATCH",
@@ -261,7 +280,7 @@ def validate_loaded_dataset(ds: Dataset) -> ValidationReport:
                         )
 
     # Check for unlinked artifacts in artifacts/
-    if ds.artifacts_dir.exists():
+    if not skip_artifacts and ds.artifacts_dir.exists():
         for art_file in sorted(ds.artifacts_dir.rglob("*")):
             if not art_file.is_file() or art_file.name.startswith("."):
                 continue

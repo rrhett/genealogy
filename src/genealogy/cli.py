@@ -39,7 +39,7 @@ from genealogy.workspace import init_workspace, upgrade_workspace
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    report = validate_dataset(args.root)
+    report = validate_dataset(args.root, skip_artifacts=args.skip_artifacts)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
     else:
@@ -408,17 +408,29 @@ def _cmd_collapse(args: argparse.Namespace) -> int:
 
 
 def _cmd_gaps(args: argparse.Namespace) -> int:
-    gaps = compute_research_gaps(args.root)
+    reg_list = (
+        [r.strip().lower() for r in args.regions.split(",") if r.strip()]
+        if args.regions
+        else None
+    )
+    gaps = compute_research_gaps(args.root, regions=reg_list)
     if args.json:
         print(json.dumps(gaps, indent=2))
         return 0
     print(f"Research Gap & Audit Report ({gaps['root']})")
-    print(f"\nMissing U.S. Federal Censuses (1790–1950, excluding 1890): {len(gaps['census_gaps'])} person(s)")
+    print(f"\nMissing Regional National Censuses: {len(gaps['census_gaps'])} person(s)")
     for row in gaps["census_gaps"]:
         miss = ", ".join(str(y) for y in row["missing_censuses"])
         cov = ", ".join(str(y) for y in row["covered_censuses"]) or "none"
-        print(f"  - {row['primary_name']} ({row['individual_id']}, {row['lifespan']})")
+        reg_lbl = "/".join(row.get("regions") or [])
+        print(f"  - {row['primary_name']} ({row['individual_id']}, {row['lifespan']}) [{reg_lbl}]")
         print(f"    Covered: {cov} | Missing: {miss}")
+
+    if gaps.get("record_gaps"):
+        print(f"\nMissing Parish / Civil Vital Records: {len(gaps['record_gaps'])} person(s)")
+        for rg in gaps["record_gaps"]:
+            reg_lbl = "/".join(rg.get("regions") or [])
+            print(f"  - {rg['primary_name']} ({rg['individual_id']}) [{reg_lbl}]: {'; '.join(rg['missing_records'])}")
 
     print(f"\nPromotion-Ready Tentative Profiles (>=2 original sources): {len(gaps['promotion_ready'])}")
     for pr in gaps["promotion_ready"]:
@@ -434,6 +446,8 @@ def _cmd_gaps(args: argparse.Namespace) -> int:
             f"  - {cm['person_a_name']} & {cm['person_b_name']}: "
             f"r={cm['wright_relationship']:.4f} ({cm['path_count']} shared blood path(s))"
         )
+        if cm.get("recommended_record"):
+            print(f"    Tip: {cm['recommended_record']}")
 
     print(f"\nPending Sources: {len(gaps['pending_sources'])} | Excluded Leads: {len(gaps['excluded_sources'])}")
     for ex in gaps["excluded_sources"]:
@@ -565,11 +579,17 @@ def _cmd_add_link(args: argparse.Namespace) -> int:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
+    reg_list = (
+        [r.strip().lower() for r in args.regions.split(",") if r.strip()]
+        if args.regions
+        else None
+    )
     rep = init_workspace(
         args.directory,
         git_init=not args.no_git,
         use_lfs=args.lfs,
         artifacts_dir=args.artifacts_dir,
+        regions=reg_list,
         plugin_only=args.plugin_only,
         ci_repo=args.ci_repo,
     )
@@ -645,6 +665,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Store raw scans outside Git (e.g., ~/Dropbox/FamilyScans) via .genealogy.yaml",
     )
     p_init.add_argument(
+        "--regions",
+        default="auto",
+        help="Comma-separated record profiles: auto, mexico, us, uk, canada, general (default: auto)",
+    )
+    p_init.add_argument(
         "--plugin-only",
         action="store_true",
         help="Skip copying AGENTS.md/.agents/ into the repo (use globally installed Antigravity plugin instead)",
@@ -672,6 +697,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_val = sub.add_parser("validate", help="Validate data/ schema, links, biology, hashes, and GPS rules")
     p_val.add_argument("--root", default=".", help="Workspace root directory (default: .)")
     p_val.add_argument("--strict", action="store_true", help="Fail with exit code 1 on warnings too")
+    p_val.add_argument(
+        "--skip-artifacts",
+        action="store_true",
+        help="Skip local artifact existence & hash checks (useful in CI when scans are in LFS or external storage)",
+    )
     p_val.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_val.set_defaults(func=_cmd_validate)
 
@@ -768,8 +798,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_col.set_defaults(func=_cmd_collapse)
 
     # gaps
-    p_gaps = sub.add_parser("gaps", help="Report missing U.S. Censuses, promotion-ready profiles, discrepancies, and excluded leads")
+    p_gaps = sub.add_parser("gaps", help="Report region-aware census/parish/civil gaps, promotion-ready profiles, discrepancies, and excluded leads")
     p_gaps.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_gaps.add_argument(
+        "--regions",
+        default=None,
+        help="Override region profiles (comma-separated: auto, mexico, us, uk, canada, general)",
+    )
     p_gaps.add_argument("--json", action="store_true", help="Output JSON")
     p_gaps.set_defaults(func=_cmd_gaps)
 

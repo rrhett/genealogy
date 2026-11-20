@@ -13,7 +13,7 @@ from typing import Any
 from genealogy.loader import Dataset, load_dataset
 from genealogy.schema import parse_genealogy_date
 
-# U.S. Federal Population Census years (1890 omitted due to 1921 fire loss)
+# Regional surviving public national census years
 US_CENSUS_YEARS = [
     1790,
     1800,
@@ -32,6 +32,178 @@ US_CENSUS_YEARS = [
     1940,
     1950,
 ]
+
+REGIONAL_CENSUS_YEARS: dict[str, list[int]] = {
+    "us": US_CENSUS_YEARS,
+    "mexico": [1930],  # 1930 Censo de Poblacion is the sole surviving public national census
+    "uk": [1841, 1851, 1861, 1871, 1881, 1891, 1901, 1911, 1921],
+    "canada": [1851, 1861, 1871, 1881, 1891, 1901, 1911, 1921, 1931],
+    "general": [],
+}
+
+_MEXICO_KEYWORDS = (
+    "mexico",
+    "méxico",
+    "mejico",
+    "méjico",
+    "nueva españa",
+    "nueva espana",
+    "nueva galicia",
+    "aguascalientes",
+    "baja california",
+    "campeche",
+    "chiapas",
+    "chihuahua",
+    "coahuila",
+    "colima",
+    "durango",
+    "guanajuato",
+    "guerrero",
+    "hidalgo",
+    "jalisco",
+    "michoacán",
+    "michoacan",
+    "morelos",
+    "nayarit",
+    "nuevo león",
+    "nuevo leon",
+    "oaxaca",
+    "puebla",
+    "querétaro",
+    "queretaro",
+    "quintana roo",
+    "san luis potosí",
+    "san luis potosi",
+    "sinaloa",
+    "sonora",
+    "tabasco",
+    "tamaulipas",
+    "tlaxcala",
+    "veracruz",
+    "yucatán",
+    "yucatan",
+    "zacatecas",
+    "ciudad de méxico",
+    "distrito federal",
+)
+
+_US_KEYWORDS = (
+    "usa",
+    "u.s.a.",
+    "united states",
+    "alabama",
+    "alaska",
+    "arizona",
+    "arkansas",
+    "california",
+    "colorado",
+    "connecticut",
+    "delaware",
+    "florida",
+    "georgia",
+    "hawaii",
+    "idaho",
+    "illinois",
+    "indiana",
+    "iowa",
+    "kansas",
+    "kentucky",
+    "louisiana",
+    "maine",
+    "maryland",
+    "massachusetts",
+    "michigan",
+    "minnesota",
+    "mississippi",
+    "missouri",
+    "montana",
+    "nebraska",
+    "nevada",
+    "new hampshire",
+    "new jersey",
+    "new mexico",
+    "new york",
+    "north carolina",
+    "north dakota",
+    "ohio",
+    "oklahoma",
+    "oregon",
+    "pennsylvania",
+    "rhode island",
+    "south carolina",
+    "south dakota",
+    "tennessee",
+    "texas",
+    "utah",
+    "vermont",
+    "virginia",
+    "washington",
+    "west virginia",
+    "wisconsin",
+    "wyoming",
+)
+
+_UK_KEYWORDS = ("united kingdom", "england", "scotland", "wales", "great britain")
+_CANADA_KEYWORDS = (
+    "canada",
+    "ontario",
+    "quebec",
+    "québec",
+    "nova scotia",
+    "new brunswick",
+    "manitoba",
+    "british columbia",
+    "saskatchewan",
+    "alberta",
+)
+
+
+def detect_individual_regions(
+    ds: Dataset,
+    individual_id: str,
+    *,
+    regions_override: list[str] | None = None,
+) -> list[str]:
+    """Resolve active regional record profiles for an individual (`auto`, `mexico`, `us`, `uk`, `canada`, `general`)."""
+    configured = regions_override
+    if configured is None:
+        cfg_val = ds.config.get("regions")
+        if isinstance(cfg_val, str):
+            configured = [cfg_val.strip().lower()]
+        elif isinstance(cfg_val, list):
+            configured = [str(x).strip().lower() for x in cfg_val if str(x).strip()]
+
+    if configured and configured != ["auto"]:
+        return [r for r in configured if r in REGIONAL_CENSUS_YEARS] or ["general"]
+
+    ind = ds.individuals[individual_id].data
+    places: list[str] = []
+    if ind.birth and ind.birth.place:
+        places.append(ind.birth.place)
+    if ind.death and ind.death.place:
+        places.append(ind.death.place)
+    for ev in ind.events:
+        if ev.place:
+            places.append(ev.place)
+    for sid in ind.all_source_ids():
+        src = ds.sources.get(sid)
+        if src and src.data.jurisdiction:
+            places.append(src.data.jurisdiction)
+
+    hay = " | ".join(places).lower()
+    detected: list[str] = []
+    # Remove U.S. "new mexico" before checking Mexico keywords
+    hay_no_nm = hay.replace("new mexico", "")
+    if any(kw in hay_no_nm for kw in _MEXICO_KEYWORDS):
+        detected.append("mexico")
+    if any(kw in hay for kw in _US_KEYWORDS):
+        detected.append("us")
+    if any(kw in hay for kw in _UK_KEYWORDS):
+        detected.append("uk")
+    if any(kw in hay for kw in _CANADA_KEYWORDS):
+        detected.append("canada")
+
+    return detected or ["general"]
 
 
 def _ordinal(n: int) -> str:
@@ -442,11 +614,16 @@ def _extract_discrepancy_bullets(body: str) -> list[str]:
     return bullets
 
 
-def compute_research_gaps(root: Path | str | Dataset) -> dict[str, Any]:
-    """Analyze missing U.S. Federal Censuses (1790-1950), promotion-ready profiles, discrepancies, and excluded/pending leads."""
+def compute_research_gaps(
+    root: Path | str | Dataset,
+    *,
+    regions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Analyze region-aware census/parish/civil gaps, promotion-ready profiles, discrepancies, and excluded leads."""
     ds = root if isinstance(root, Dataset) else load_dataset(root)
 
     census_gaps: list[dict[str, Any]] = []
+    record_gaps: list[dict[str, Any]] = []
     promotion_ready: list[dict[str, Any]] = []
     discrepancies: list[dict[str, Any]] = []
 
@@ -456,25 +633,36 @@ def compute_research_gaps(root: Path | str | Dataset) -> dict[str, Any]:
         if d.status == "excluded":
             continue
 
+        ind_regions = detect_individual_regions(ds, iid, regions_override=regions)
+
         all_sids = set(d.all_source_ids())
         for rel in ds.relationships:
             if iid in (rel.person_1, rel.person_2):
                 all_sids.update(rel.sources)
 
-        # Census gap check
+        valid_srcs = [
+            ds.sources[sid].data
+            for sid in all_sids
+            if sid in ds.sources and ds.sources[sid].data.relevance != "excluded"
+        ]
+
+        # Region-aware census gap check
         b_date = parse_genealogy_date(d.birth.date) if d.birth else None
         d_date = parse_genealogy_date(d.death.date) if d.death else None
         b_year = b_date.year_min if b_date else None
         d_year = d_date.year_max if d_date else (1950 if d.living else (b_year + 85 if b_year else None))
 
-        if b_year is not None and d_year is not None:
-            expected_years = [y for y in US_CENSUS_YEARS if b_year <= y <= d_year]
+        applicable_census_years: set[int] = set()
+        for reg in ind_regions:
+            applicable_census_years.update(REGIONAL_CENSUS_YEARS.get(reg, []))
+
+        if applicable_census_years and b_year is not None and d_year is not None:
+            expected_years = [y for y in sorted(applicable_census_years) if b_year <= y <= d_year]
             covered_years: set[int] = set()
-            for sid in all_sids:
-                src = ds.sources.get(sid)
-                if not src or src.data.record_type != "census" or src.data.relevance == "excluded":
+            for s in valid_srcs:
+                if s.record_type != "census":
                     continue
-                sd = parse_genealogy_date(src.data.date)
+                sd = parse_genealogy_date(s.date)
                 if sd and sd.year_min:
                     covered_years.add(sd.year_min)
             missing = [y for y in expected_years if y not in covered_years]
@@ -483,11 +671,40 @@ def compute_research_gaps(root: Path | str | Dataset) -> dict[str, Any]:
                     {
                         "individual_id": iid,
                         "primary_name": d.primary_name,
+                        "regions": ind_regions,
                         "lifespan": f"{d.birth.date if d.birth else '?'} - {'Living' if d.living else (d.death.date if d.death else '?')}",
                         "covered_censuses": sorted(covered_years),
                         "missing_censuses": missing,
                     }
                 )
+
+        # Region-aware vital / parish record gaps (especially for Mexico / international lines)
+        missing_milestones: list[str] = []
+        has_church = any(s.record_type == "church" for s in valid_srcs) or any(
+            ev.type == "baptism" for ev in d.events
+        )
+        has_vital = any(s.record_type == "vital" for s in valid_srcs)
+        if "mexico" in ind_regions:
+            if not has_church:
+                missing_milestones.append(
+                    "Catholic Parish record (Bautismo / Matrimonio / Defunción)"
+                )
+            if ((b_year and b_year >= 1859) or (d_year and d_year >= 1859)) and not has_vital:
+                missing_milestones.append(
+                    "Mexican Registro Civil (Acta de Nacimiento / Matrimonio / Defunción, 1859+)"
+                )
+        elif ind_regions == ["general"] and not has_vital and not has_church:
+            missing_milestones.append("Primary vital or church record (birth/baptism or death/burial)")
+
+        if missing_milestones:
+            record_gaps.append(
+                {
+                    "individual_id": iid,
+                    "primary_name": d.primary_name,
+                    "regions": ind_regions,
+                    "missing_records": missing_milestones,
+                }
+            )
 
         # Promotion-ready check
         if d.status == "tentative":
@@ -533,11 +750,22 @@ def compute_research_gaps(root: Path | str | Dataset) -> dict[str, Any]:
         for sid, src in sorted(ds.sources.items())
         if src.data.relevance == "excluded"
     ]
-    consanguineous = [r.to_dict() for r in find_consanguineous_marriages(ds)]
+    consanguineous = []
+    for rep in find_consanguineous_marriages(ds):
+        d_rep = rep.to_dict()
+        r_a = detect_individual_regions(ds, rep.person_a, regions_override=regions)
+        r_b = detect_individual_regions(ds, rep.person_b, regions_override=regions)
+        if "mexico" in r_a or "mexico" in r_b:
+            d_rep["recommended_record"] = (
+                "Search diocesan Informaciones / Dispensas Matrimoniales "
+                "(often includes a drawn 3–4 generation pedigree tree & elderly witness testimony)."
+            )
+        consanguineous.append(d_rep)
 
     return {
         "root": str(ds.root),
         "census_gaps": census_gaps,
+        "record_gaps": record_gaps,
         "promotion_ready": promotion_ready,
         "discrepancies": discrepancies,
         "pending_sources": pending_sources,

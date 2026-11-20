@@ -245,6 +245,9 @@ class IndividualFrontmatter(BaseModel):
 
     id: str
     primary_name: str = Field(min_length=1)
+    given_name: str | None = None
+    surname: str | None = None
+    maternal_surname: str | None = None
     name_variants: list[str] = Field(default_factory=list)
     sex: Literal["M", "F", "X", "U"] = "U"
     living: bool = False

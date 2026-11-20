@@ -36,8 +36,8 @@ You must strictly respect directory ownership (enforced mechanically by lifecycl
 Adhere strictly to deterministic IDs and YAML frontmatter. Run `genealogy validate` after modifying `data/`.
 
 ### Identifier Format
-- **Individuals:** `I-<SURNAME>-<GIVEN>-<BIRTHYEAR>` (e.g., `I-WEST-CLAUDE-1886`). Use `UNKNOWN` if birth year is completely unknown (`I-WEST-JOHN-UNKNOWN`). Append `-01`, `-02` only if two distinct individuals share the exact same surname, given name, and birth year.
-- **Sources:** `S-<YEAR>-<TYPE>-<SLUG>` (e.g., `S-1910-CENSUS-WEST-COCKE-TN`). Use `UNDATED` if record year is unknown (`S-UNDATED-BIBLE-WEST-FAMILY`).
+- **Individuals:** `I-<SURNAME>-<GIVEN>-<BIRTHYEAR>` (e.g., `I-WEST-CLAUDE-1886`, or for Hispanic double surnames `I-GARCIA-JOSE-1870` using the ASCII-transliterated paternal surname). Use `UNKNOWN` if birth year is completely unknown (`I-WEST-JOHN-UNKNOWN`). Append `-01`, `-02` only if two distinct individuals share the exact same surname, given name, and birth year.
+- **Sources:** `S-<YEAR>-<TYPE>-<SLUG>` (e.g., `S-1910-CENSUS-WEST-COCKE-TN`, `S-1870-CHURCH-GARCIA-BAUTISMO-JALISCO`). Use `UNDATED` if record year is unknown (`S-UNDATED-BIBLE-WEST-FAMILY`).
 - **Artifacts:** Always reference logical relative paths starting with `artifacts/` (e.g., `artifacts/1910_census_cocke_tn_p4a.png`) and record `artifact_sha256` (obtainable via `genealogy intake`). Paths resolve cleanly even when the user stores scans in an external `artifacts_dir`.
 
 ### Genealogical Date Format
@@ -52,7 +52,10 @@ Filename must match `id` exactly (e.g., `data/individuals/I-WEST-CLAUDE-1886.md`
 ```yaml
 ---
 id: I-WEST-CLAUDE-1886
-primary_name: "Claude West"
+primary_name: "Claude West"      # Full UTF-8 display name (e.g., "José María García López")
+given_name: "Claude"             # Optional: explicit given name(s) for accurate GEDCOM export
+surname: "West"                  # Optional: primary / paternal surname (apellido paterno)
+maternal_surname: ""             # Optional: maternal surname (apellido materno) for Hispanic/compound names
 name_variants:
   - "Claud West"
   - "C. West"
