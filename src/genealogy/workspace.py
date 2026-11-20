@@ -102,11 +102,11 @@ genealogy report <ID>                   # Generate a printable Family Group Shee
 genealogy export-gedcom build/tree.ged  # Export GEDCOM 7.0 (redacts living people by default)
 ```
 
-## Quick Prompt: Ingesting New Scans Dropped in `artifacts/`
-Drop one or more scans into `artifacts/`, then prompt your AI assistant:
-```text
-I added new scan(s) to artifacts/ (optional URL: <paste Ancestry/FamilySearch link>). Run `genealogy intake`, verify none duplicate previously excluded leads, transcribe verbatim into data/sources/ using the artifact-transcription skill (including English translation if in Spanish/Latin), cross-reference against data/individuals/ and data/relationships.yaml, flag discrepancies without overwriting prior facts, and finish with `genealogy validate`.
-```
+## Everyday Slash Commands (`/` in Chat)
+- `/status` — Session-start briefing (`AGENTS.local.md`, `workspace/`, `genealogy stats`, `genealogy gaps`).
+- `/ingest` — Drop scans into `artifacts/` (or notes into `notes/`), then run `/ingest` to run `genealogy intake`, attach URLs, transcribe verbatim, update `data/`, and validate.
+- `/exclude` — Mark a mistaken lead `relevance: excluded` without deleting the scan from `artifacts/`.
+- `/wrap-up` — End-of-session validation, `workspace/` scratchpad updates, and commit summary.
 
 ## Pulling Future Toolkit Updates
 Your family data lives completely separate from the Python toolkit. Whenever the toolkit adds new skills, hooks, or CLI features:

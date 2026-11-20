@@ -213,7 +213,7 @@ def test_validate_on_stop_hook(tmp_path: Path) -> None:
 def test_all_skills_have_valid_frontmatter() -> None:
     skills_dir = PLUGIN_ROOT / "skills"
     skill_files = sorted(skills_dir.glob("*/SKILL.md"))
-    assert len(skill_files) == 7
+    assert len(skill_files) == 11
     for sf in skill_files:
         meta, body = read_markdown_frontmatter(sf)
         assert meta.get("name") == sf.parent.name
