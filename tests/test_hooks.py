@@ -38,6 +38,22 @@ def test_hooks_json_is_valid() -> None:
     assert "validate-data-on-stop" in hooks_cfg
 
 
+def test_version_sync() -> None:
+    import tomllib
+
+    from genealogy import __version__
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pkg_version = pyproject["project"]["version"]
+    plugin_manifest = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
+    lock_data = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    lock_pkg = next(p for p in lock_data["package"] if p["name"] == "genealogy-workspace")
+
+    assert __version__ == pkg_version
+    assert plugin_manifest["version"] == pkg_version
+    assert lock_pkg["version"] == pkg_version
+
+
 def test_guard_boundaries_blocks_artifacts_and_asks_on_notes(tmp_path: Path) -> None:
     # Unrelated non-genealogy software repo -> hook is a no-op (allows writes to build artifacts/)
     software_repo = tmp_path / "software_app"
