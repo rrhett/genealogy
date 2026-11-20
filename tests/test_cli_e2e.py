@@ -96,3 +96,27 @@ def test_cli_db_query_timeline_tree_gedcom(tmp_path: Path, capsys) -> None:
     assert main(["view", "--root", str(EXAMPLE_ROOT), "--out", str(html_out)]) == 0
     assert html_out.exists()
     assert "Genealogy DAG Viewer" in html_out.read_text(encoding="utf-8")
+
+
+def test_init_prints_sandbox_allowlist_for_uv_tool(tmp_path: Path, monkeypatch, capsys) -> None:
+    fake_home = tmp_path / "home"
+    fake_bin = fake_home / ".local" / "bin" / "genealogy"
+    fake_venv = fake_home / ".local" / "share" / "uv" / "tools" / "genealogy-workspace"
+    fake_py_root = fake_home / ".local" / "share" / "uv" / "python" / "cpython-3.13"
+    fake_py = fake_py_root / "bin" / "python3.13"
+    for p in (fake_bin.parent, fake_venv, fake_py.parent):
+        p.mkdir(parents=True, exist_ok=True)
+    fake_bin.write_text("", encoding="utf-8")
+    fake_py.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("genealogy.cli.shutil.which", lambda name: str(fake_bin) if name == "genealogy" else None)
+    monkeypatch.setattr("genealogy.cli.sys.prefix", str(fake_venv))
+    monkeypatch.setattr("genealogy.cli.sys.executable", str(fake_py))
+
+    repo_dir = tmp_path / "my-family"
+    assert main(["init", str(repo_dir), "--no-git"]) == 0
+    out = capsys.readouterr().out
+    assert "Antigravity Terminal Sandbox:" in out
+    assert str(fake_bin) in out
+    assert str(fake_venv) in out
+    assert str(fake_py_root) in out

@@ -183,3 +183,5 @@ Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown
    - `genealogy import-gedcom <file>` / `genealogy export-gedcom <out>` — GEDCOM 5.5.1 / 7.0 pipelines.
    - `genealogy search newspapers|nara|wikitree ...` — Query open archival APIs (always treat WikiTree results as secondary leads).
    - `genealogy upgrade-workspace` — Refresh managed `AGENTS.md`, skills, and hooks after running `uv tool upgrade genealogy-workspace`.
+
+   > **Sandbox note:** If `genealogy` is not found in the terminal sandbox (for example, `uv tool install` placed it in `~/.local/bin`, which is outside the sandbox), run `genealogy` commands outside the sandbox (`BypassSandbox: true`) or ask the user to grant read-only access to `~/.local/bin/genealogy` and its `uv` tool/Python directories in Project-Level Settings.

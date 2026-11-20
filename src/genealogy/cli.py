@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -596,6 +597,47 @@ def _cmd_add_link(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_standard_system_path(path: Path) -> bool:
+    """Return True if *path* lives under standard system binary/library roots."""
+    parts = path.parts
+    if len(parts) < 2 or parts[0] != "/":
+        return False
+    return parts[1] in {"usr", "bin", "lib", "lib64", "System", "opt"}
+
+
+def _sandbox_allowlist_paths(repo_root: Path) -> list[Path]:
+    """Return non-workspace paths needed to execute `genealogy` inside a sandbox."""
+    resolved_root = repo_root.resolve()
+    candidates: list[Path] = []
+
+    bin_path = shutil.which("genealogy")
+    if bin_path:
+        candidates.append(Path(bin_path))
+
+    prefix_path = Path(sys.prefix).resolve()
+    candidates.append(prefix_path)
+
+    exe_resolved = Path(sys.executable).resolve()
+    # Cover uv-managed Python installs (e.g. ~/.local/share/uv/python/cpython-...)
+    exe_root = exe_resolved.parent.parent if exe_resolved.parent.name == "bin" else exe_resolved.parent
+    candidates.append(exe_root)
+
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if _is_standard_system_path(path):
+            continue
+        if path.is_relative_to(resolved_root):
+            continue
+        if any(path != existing and path.is_relative_to(existing) for existing in result):
+            continue
+        result.append(path)
+    return result
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     reg_list = (
         [r.strip().lower() for r in args.regions.split(",") if r.strip()]
@@ -630,6 +672,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
     print("     git remote add origin <your-private-repo-url> && git push -u origin main")
     print("  4. Drop record scans in artifacts/ and notes in notes/, then run:")
     print("     genealogy intake")
+
+    allow_paths = _sandbox_allowlist_paths(rep.root)
+    if allow_paths:
+        print("\nAntigravity Terminal Sandbox:")
+        print("  If using Antigravity's Terminal Sandbox, grant read-only access in Project-Level Settings to:")
+        for path in allow_paths:
+            print(f"    - {path}")
+        print("  (Or approve running `genealogy` outside the sandbox when prompted.)")
     return 0
 
 
