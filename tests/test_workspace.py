@@ -343,10 +343,23 @@ def test_upgrade_workspace_outputs_suggested_prompts(tmp_path: Path, monkeypatch
 
     # 1) Verify release.sh promotion helper moves PENDING_UPGRADE_PROMPTS into UPGRADE_DATA_PROMPTS
     ws_py_copy = tmp_path / "workspace_copy.py"
-    real_ws_py = Path(__file__).resolve().parents[1] / "src" / "genealogy" / "workspace.py"
-    ws_py_copy.write_text(real_ws_py.read_text(encoding="utf-8"), encoding="utf-8")
+    ws_py_copy.write_text(
+        "\n".join(
+            [
+                "# --- BEGIN UPGRADE PROMPTS (managed by scripts/release.sh) ---",
+                "PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = [",
+                '    ("Sample title", "Sample prompt"),',
+                "]",
+                "",
+                "UPGRADE_DATA_PROMPTS: list[tuple[tuple[int, ...], str, str]] = []",
+                "# --- END UPGRADE PROMPTS ---",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     promoted = promote_pending_upgrade_prompts(ws_py_copy, "0.9.0")
-    assert promoted >= 1
+    assert promoted == 1
     promoted_text = ws_py_copy.read_text(encoding="utf-8")
     assert "PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = []" in promoted_text
     assert "(0, 9, 0)," in promoted_text
