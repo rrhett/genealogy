@@ -895,6 +895,11 @@ def _cmd_upgrade_workspace(args: argparse.Namespace) -> int:
             print("  git status")
             print(f"  git add {targets_str}")
             print(f'  git commit -m "Upgrade genealogy workspace to toolkit v{rep.toolkit_version}"')
+    if rep.suggested_prompts:
+        print("\nSuggested Antigravity prompt(s) to update your existing data/ files:")
+        for idx, item in enumerate(rep.suggested_prompts, start=1):
+            print(f"  {idx}. [v{item['version']}] {item['title']}")
+            print(f'     "{item["prompt"]}"')
     return 0
 
 

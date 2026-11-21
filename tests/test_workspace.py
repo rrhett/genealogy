@@ -334,3 +334,45 @@ def test_shell_completion_generation(capsys) -> None:
     bash_script = capsys.readouterr().out
     proc = subprocess.run(["bash", "-n"], input=bash_script, text=True, capture_output=True)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_upgrade_workspace_outputs_suggested_prompts(tmp_path: Path, monkeypatch, capsys) -> None:
+    import yaml
+
+    from genealogy.workspace import promote_pending_upgrade_prompts
+
+    # 1) Verify release.sh promotion helper moves PENDING_UPGRADE_PROMPTS into UPGRADE_DATA_PROMPTS
+    ws_py_copy = tmp_path / "workspace_copy.py"
+    real_ws_py = Path(__file__).resolve().parents[1] / "src" / "genealogy" / "workspace.py"
+    ws_py_copy.write_text(real_ws_py.read_text(encoding="utf-8"), encoding="utf-8")
+    promoted = promote_pending_upgrade_prompts(ws_py_copy, "0.9.0")
+    assert promoted >= 1
+    promoted_text = ws_py_copy.read_text(encoding="utf-8")
+    assert "PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = []" in promoted_text
+    assert "(0, 9, 0)," in promoted_text
+    assert promote_pending_upgrade_prompts(ws_py_copy, "0.9.1") == 0
+
+    # 2) Verify CLI outputs suggested prompts when crossing a version boundary, and not on re-run
+    ws = tmp_path / "ws-prompts"
+    init_workspace(ws, git_init=False)
+    cfg_path = ws / ".genealogy.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["toolkit_version"] = "0.8.0"
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    monkeypatch.setattr("genealogy.workspace.__version__", "0.9.0")
+    monkeypatch.setattr(
+        "genealogy.workspace.UPGRADE_DATA_PROMPTS",
+        [((0, 9, 0), "Migrate marriage & marriage-investigation events", "Audit marriage_investigation events.")],
+    )
+
+    assert main(["upgrade-workspace", "--root", str(ws)]) == 0
+    out = capsys.readouterr().out
+    assert "Suggested Antigravity prompt(s)" in out
+    assert "[v0.9.0]" in out
+    assert "marriage_investigation" in out
+
+    # Re-running when already on 0.9.0 does not repeat the prompt
+    assert main(["upgrade-workspace", "--root", str(ws)]) == 0
+    out_again = capsys.readouterr().out
+    assert "Suggested Antigravity prompt(s)" not in out_again

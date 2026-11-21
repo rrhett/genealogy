@@ -167,6 +167,14 @@ plugin_json = Path("plugin/plugin.json")
 plugin_data = json.loads(plugin_json.read_text(encoding="utf-8"))
 plugin_data["version"] = new_ver
 plugin_json.write_text(json.dumps(plugin_data, indent=2) + "\n", encoding="utf-8")
+
+sys.path.insert(0, str(Path("src").resolve()))
+from genealogy.workspace import promote_pending_upgrade_prompts
+
+ws_py = Path("src/genealogy/workspace.py")
+promoted = promote_pending_upgrade_prompts(ws_py, new_ver)
+if promoted:
+    print(f"Promoted {promoted} pending upgrade prompt(s) in {ws_py} to v{new_ver}.")
 PY
 
 if command -v uv >/dev/null 2>&1; then
@@ -199,7 +207,7 @@ else
   .venv/bin/pytest -q
 fi
 
-git add pyproject.toml src/genealogy/__init__.py plugin/plugin.json uv.lock
+git add pyproject.toml src/genealogy/__init__.py plugin/plugin.json uv.lock src/genealogy/workspace.py
 git commit -m "chore: release ${TAG}"
 git tag -a "${TAG}" -m "Release ${TAG}"
 

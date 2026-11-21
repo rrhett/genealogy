@@ -197,6 +197,111 @@ class SyncReport:
     config_updated: bool = False
     committed: bool = False
     commit_sha: str | None = None
+    previous_version: str | None = None
+    suggested_prompts: list[dict[str, str]] = field(default_factory=list)
+
+
+# Versioned prompts surfaced by `genealogy upgrade-workspace` when crossing a version
+# boundary that introduces new schema/data conventions.
+# Add unreleased prompts to PENDING_UPGRADE_PROMPTS; scripts/release.sh automatically
+# promotes them into UPGRADE_DATA_PROMPTS under the released version tuple.
+# --- BEGIN UPGRADE PROMPTS (managed by scripts/release.sh) ---
+PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = [
+    (
+        "Migrate marriage & marriage-investigation events",
+        (
+            "Audit data/individuals/ and data/relationships.yaml for two legacy patterns: "
+            "(1) marriage details stored under type: residence or type: other events (check "
+            "suggested_label or descriptions), and (2) pre-marital proceedings (Informaciones "
+            "Matrimoniales, Presentaciones, Dispensas, banns, or marriage bonds) stored as "
+            "type: marriage events. Move pre-marital proceedings to type: marriage_investigation, "
+            "reserve type: marriage in events: strictly for actual ceremonies or civil actas, "
+            "and ensure every couple remains linked in data/relationships.yaml (using "
+            'date: "aft <investigation_date>" and confidence: probable where the ceremony record '
+            "is still missing). Finally, run genealogy validate and genealogy gaps to verify."
+        ),
+    ),
+]
+
+UPGRADE_DATA_PROMPTS: list[tuple[tuple[int, ...], str, str]] = []
+# --- END UPGRADE PROMPTS ---
+
+
+def promote_pending_upgrade_prompts(workspace_py_path: Path, new_version: str) -> int:
+    """Promote PENDING_UPGRADE_PROMPTS in `workspace_py_path` into UPGRADE_DATA_PROMPTS for `new_version`."""
+    import ast
+
+    text = workspace_py_path.read_text(encoding="utf-8")
+    begin_marker = "# --- BEGIN UPGRADE PROMPTS (managed by scripts/release.sh) ---"
+    end_marker = "# --- END UPGRADE PROMPTS ---"
+    start_idx = text.index(begin_marker)
+    end_idx = text.index(end_marker) + len(end_marker)
+    block = text[start_idx:end_idx]
+
+    ns: dict[str, Any] = {}
+    exec(compile(ast.parse(block), str(workspace_py_path), "exec"), ns)
+    pending: list[tuple[str, str]] = list(ns.get("PENDING_UPGRADE_PROMPTS", []))
+    released: list[tuple[tuple[int, ...], str, str]] = list(ns.get("UPGRADE_DATA_PROMPTS", []))
+    if not pending:
+        return 0
+
+    ver_tuple = _parse_version_tuple(new_version)
+    for title, prompt in pending:
+        released.append((ver_tuple, title, prompt))
+
+    lines = [
+        begin_marker,
+        "PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = []",
+        "",
+        "UPGRADE_DATA_PROMPTS: list[tuple[tuple[int, ...], str, str]] = [",
+    ]
+    for vt, title, prompt in released:
+        lines.append("    (")
+        lines.append(f"        {vt!r},")
+        lines.append(f"        {title!r},")
+        lines.append(f"        {prompt!r},")
+        lines.append("    ),")
+    lines.append("]")
+    lines.append(end_marker)
+
+    new_text = text[:start_idx] + "\n".join(lines) + text[end_idx:]
+    workspace_py_path.write_text(new_text, encoding="utf-8")
+    return len(pending)
+
+
+def _parse_version_tuple(version_str: str | None) -> tuple[int, ...]:
+    """Parse a semantic version string (e.g. '0.8.1') into an integer tuple."""
+    if not version_str:
+        return (0, 0, 0)
+    parts: list[int] = []
+    for raw in version_str.strip().lstrip("v").split("."):
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def suggested_prompts_for_upgrade(
+    previous_version: str | None,
+    current_version: str,
+) -> list[dict[str, str]]:
+    """Return data-migration prompts introduced between `previous_version` and `current_version`."""
+    prev_t = _parse_version_tuple(previous_version)
+    curr_t = _parse_version_tuple(current_version)
+    if prev_t >= curr_t:
+        return []
+    prompts: list[dict[str, str]] = []
+    for ver_t, title, prompt in UPGRADE_DATA_PROMPTS:
+        if prev_t < ver_t <= curr_t:
+            prompts.append(
+                {
+                    "version": ".".join(str(x) for x in ver_t),
+                    "title": title,
+                    "prompt": prompt,
+                }
+            )
+    return prompts
 
 
 def is_workspace_dir(root: Path | str) -> bool:
@@ -468,6 +573,8 @@ def upgrade_workspace(
         ensure_git_clean(root_path)
 
     cfg = load_workspace_config(root_path)
+    previous_version = str(cfg["toolkit_version"]) if cfg.get("toolkit_version") else None
+    prompts = suggested_prompts_for_upgrade(previous_version, __version__)
 
     if plugin_only is None:
         effective_plugin_only = cfg.get("agent_mode") == "plugin"
@@ -507,4 +614,6 @@ def upgrade_workspace(
         config_updated=config_updated,
         committed=committed,
         commit_sha=commit_sha,
+        previous_version=previous_version,
+        suggested_prompts=prompts,
     )
