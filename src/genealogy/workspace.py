@@ -206,24 +206,15 @@ class SyncReport:
 # Add unreleased prompts to PENDING_UPGRADE_PROMPTS; scripts/release.sh automatically
 # promotes them into UPGRADE_DATA_PROMPTS under the released version tuple.
 # --- BEGIN UPGRADE PROMPTS (managed by scripts/release.sh) ---
-PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = [
+PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = []
+
+UPGRADE_DATA_PROMPTS: list[tuple[tuple[int, ...], str, str]] = [
     (
-        "Migrate marriage & marriage-investigation events",
-        (
-            "Audit data/individuals/ and data/relationships.yaml for two legacy patterns: "
-            "(1) marriage details stored under type: residence or type: other events (check "
-            "suggested_label or descriptions), and (2) pre-marital proceedings (Informaciones "
-            "Matrimoniales, Presentaciones, Dispensas, banns, or marriage bonds) stored as "
-            "type: marriage events. Move pre-marital proceedings to type: marriage_investigation, "
-            "reserve type: marriage in events: strictly for actual ceremonies or civil actas, "
-            "and ensure every couple remains linked in data/relationships.yaml (using "
-            'date: "aft <investigation_date>" and confidence: probable where the ceremony record '
-            "is still missing). Finally, run genealogy validate and genealogy gaps to verify."
-        ),
+        (0, 9, 0),
+        'Migrate marriage & marriage-investigation events',
+        'Audit data/individuals/ and data/relationships.yaml for two legacy patterns: (1) marriage details stored under type: residence or type: other events (check suggested_label or descriptions), and (2) pre-marital proceedings (Informaciones Matrimoniales, Presentaciones, Dispensas, banns, or marriage bonds) stored as type: marriage events. Move pre-marital proceedings to type: marriage_investigation, reserve type: marriage in events: strictly for actual ceremonies or civil actas, and ensure every couple remains linked in data/relationships.yaml (using date: "aft <investigation_date>" and confidence: probable where the ceremony record is still missing). Finally, run genealogy validate and genealogy gaps to verify.',
     ),
 ]
-
-UPGRADE_DATA_PROMPTS: list[tuple[tuple[int, ...], str, str]] = []
 # --- END UPGRADE PROMPTS ---
 
 
