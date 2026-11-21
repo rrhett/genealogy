@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -28,6 +29,7 @@ from genealogy.apis.wikitree import (
     get_wikitree_profile,
     search_wikitree_person,
 )
+from genealogy.completion import generate_completion
 from genealogy.constraints import evaluate_all_constraints
 from genealogy.db import build_sqlite, run_sql_query, search_fts
 from genealogy.gedcom import export_gedcom, import_gedcom
@@ -42,7 +44,7 @@ from genealogy.timeline import build_timeline_markdown, render_tree
 from genealogy.urls import add_link_to_source
 from genealogy.validator import validate_dataset
 from genealogy.viewer import export_viewer_html, serve_viewer
-from genealogy.workspace import init_workspace, upgrade_workspace
+from genealogy.workspace import init_workspace, is_workspace_dir, upgrade_workspace
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -842,6 +844,7 @@ def _cmd_upgrade_workspace(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             plugin_only=plugin_override,
             allow_dirty=args.allow_dirty,
+            auto_commit=not args.no_commit,
         )
     except (RuntimeError, FileNotFoundError) as exc:
         print(f"upgrade-workspace error: {exc}", file=sys.stderr)
@@ -858,20 +861,73 @@ def _cmd_upgrade_workspace(args: argparse.Namespace) -> int:
             print(f"    [{label}] {item}")
     if not args.dry_run and (rep.added or rep.updated or rep.removed or rep.config_updated):
         print("\nUser files untouched: data/, artifacts/, notes/, workspace/, README.md, AGENTS.local.md.")
-        staged_targets: list[str] = []
-        if (rep.root / ".genealogy.yaml").exists():
-            staged_targets.append(".genealogy.yaml")
-        if (rep.root / "AGENTS.md").exists():
-            staged_targets.append("AGENTS.md")
-        if (rep.root / ".agents").exists():
-            staged_targets.append(".agents/")
-        targets_str = " ".join(staged_targets) if staged_targets else "-A"
-        print("\nRecommended git commands to review and commit the update:")
-        if rep.root != Path.cwd().resolve():
-            print(f"  cd {rep.root}")
-        print("  git status")
-        print(f"  git add {targets_str}")
-        print(f'  git commit -m "Upgrade genealogy workspace to toolkit v{rep.toolkit_version}"')
+        if rep.committed:
+            print(f"\nCommitted workspace upgrade ({rep.commit_sha}).")
+        else:
+            staged_targets: list[str] = []
+            if (rep.root / ".genealogy.yaml").exists():
+                staged_targets.append(".genealogy.yaml")
+            if (rep.root / "AGENTS.md").exists():
+                staged_targets.append("AGENTS.md")
+            if (rep.root / ".agents").exists():
+                staged_targets.append(".agents/")
+            targets_str = " ".join(staged_targets) if staged_targets else "-A"
+            print("\nRecommended git commands to review and commit the update:")
+            if rep.root != Path.cwd().resolve():
+                print(f"  cd {rep.root}")
+            print("  git status")
+            print(f"  git add {targets_str}")
+            print(f'  git commit -m "Upgrade genealogy workspace to toolkit v{rep.toolkit_version}"')
+    return 0
+
+
+def _cmd_upgrade(args: argparse.Namespace) -> int:
+    root_path = Path(args.root).expanduser().resolve()
+    in_workspace = (not args.no_workspace) and is_workspace_dir(root_path)
+
+    if args.dry_run:
+        print("[DRY RUN] Would run: uv tool upgrade genealogy-workspace")
+        if in_workspace:
+            extra = []
+            if args.no_commit:
+                extra.append("--no-commit")
+            if args.allow_dirty:
+                extra.append("--allow-dirty")
+            suffix = f" {' '.join(extra)}" if extra else ""
+            print(
+                f"[DRY RUN] Workspace detected at {root_path}; "
+                f"would run: genealogy upgrade-workspace --root {root_path}{suffix}"
+            )
+        return 0
+
+    uv_bin = shutil.which("uv")
+    if not uv_bin:
+        print(
+            "upgrade error: `uv` not found on PATH. Install uv or run `uv tool upgrade genealogy-workspace` manually.",
+            file=sys.stderr,
+        )
+        return 1
+
+    uv_proc = subprocess.run([uv_bin, "tool", "upgrade", "genealogy-workspace"])
+    if uv_proc.returncode != 0:
+        return int(uv_proc.returncode)
+
+    if in_workspace:
+        # Re-exec via the newly upgraded CLI binary so the new bundled plugin & version are used.
+        genealogy_bin = shutil.which("genealogy") or sys.argv[0]
+        cmd = [genealogy_bin, "upgrade-workspace", "--root", str(root_path)]
+        if args.no_commit:
+            cmd.append("--no-commit")
+        if args.allow_dirty:
+            cmd.append("--allow-dirty")
+        ws_proc = subprocess.run(cmd)
+        return int(ws_proc.returncode)
+
+    return 0
+
+
+def _cmd_completion(args: argparse.Namespace) -> int:
+    print(generate_completion(build_parser(), args.shell), end="")
     return 0
 
 
@@ -914,9 +970,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.set_defaults(func=_cmd_init)
 
+    # upgrade (self-upgrade via uv + auto-upgrade workspace if detected)
+    p_self_upg = sub.add_parser(
+        "upgrade",
+        aliases=["update"],
+        help="Upgrade the genealogy CLI via uv (and refresh the current workspace if inside one)",
+    )
+    p_self_upg.add_argument("--root", default=".", help="Workspace root directory to check/upgrade (default: .)")
+    p_self_upg.add_argument(
+        "--no-workspace",
+        action="store_true",
+        help="Upgrade only the CLI; skip refreshing the current workspace even if detected",
+    )
+    p_self_upg.add_argument("--dry-run", action="store_true", help="Preview upgrade commands without executing")
+    p_self_upg.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Do not automatically commit managed workspace updates if a workspace is upgraded",
+    )
+    p_self_upg.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow upgrading workspace even if git has uncommitted changes",
+    )
+    p_self_upg.set_defaults(func=_cmd_upgrade)
+
     # upgrade-workspace
     p_upg = sub.add_parser(
         "upgrade-workspace",
+        aliases=["update-workspace"],
         help="Refresh managed AGENTS.md, skills, and hooks after upgrading the genealogy CLI",
     )
     p_upg.add_argument("--root", default=".", help="Workspace root directory (default: .)")
@@ -926,10 +1008,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow upgrading even if the git workspace has uncommitted changes",
     )
+    p_upg.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Do not automatically commit managed workspace updates",
+    )
     mode_grp = p_upg.add_mutually_exclusive_group()
     mode_grp.add_argument("--plugin-only", action="store_true", help="Switch workspace to global plugin mode")
     mode_grp.add_argument("--embed-agent", action="store_true", help="Sync AGENTS.md and .agents/ into workspace")
     p_upg.set_defaults(func=_cmd_upgrade_workspace)
+
+    # completion
+    p_comp = sub.add_parser(
+        "completion",
+        help="Print shell tab-completion script (eval \"$(genealogy completion bash)\")",
+    )
+    p_comp.add_argument("shell", choices=["bash", "zsh", "fish"], help="Target shell")
+    p_comp.set_defaults(func=_cmd_completion)
 
     # validate
     p_val = sub.add_parser("validate", help="Validate data/ schema, links, biology, hashes, and GPS rules")

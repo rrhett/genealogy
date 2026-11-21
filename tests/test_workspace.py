@@ -185,7 +185,7 @@ def test_upgrade_workspace_requires_clean_git_and_prints_commit_commands(
     _git(target, "add", "-A")
     _git(target, "commit", "-m", "Simulate older AGENTS.md")
 
-    assert main(["upgrade-workspace", "--root", str(target)]) == 0
+    assert main(["upgrade-workspace", "--root", str(target), "--no-commit"]) == 0
     out = capsys.readouterr().out
     assert "Recommended git commands to review and commit the update:" in out
     assert "git status" in out
@@ -209,3 +209,128 @@ def test_upgrade_workspace_allow_dirty_flag(tmp_path: Path, capsys) -> None:
     assert "[UPD] AGENTS.md" in out
     assert "git add .genealogy.yaml AGENTS.md .agents/" in out
     assert (target / "notes" / "draft.md").read_text(encoding="utf-8") == "WIP\n"
+
+
+def test_upgrade_workspace_auto_commit_default_and_alias(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "family-autocommit"
+    init_workspace(target, git_init=True)
+    _git(target, "config", "user.email", "test@example.com")
+    _git(target, "config", "user.name", "Test User")
+    _git(target, "add", "-A")
+    _git(target, "commit", "-m", "Initial commit")
+
+    # Simulate outdated managed file
+    (target / "AGENTS.md").write_text("# Outdated AGENTS\n", encoding="utf-8")
+    _git(target, "add", "AGENTS.md")
+    _git(target, "commit", "-m", "Old AGENTS")
+
+    # Run via `update-workspace` alias (auto-commits by default)
+    assert main(["update-workspace", "--root", str(target)]) == 0
+    out = capsys.readouterr().out
+    assert "[UPD] AGENTS.md" in out
+    assert "Committed workspace upgrade" in out
+
+    # Working tree should be clean after auto-commit
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(target),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout.strip() == ""
+    log = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=str(target),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Upgrade genealogy workspace to toolkit v" in log.stdout
+
+    # Re-running with no changes should not fail or commit
+    assert main(["update-workspace", "--root", str(target)]) == 0
+    out2 = capsys.readouterr().out
+    assert "Committed workspace upgrade" not in out2
+
+
+def test_upgrade_workspace_skips_commit_on_non_git(tmp_path: Path) -> None:
+    non_git = tmp_path / "no-git"
+    init_workspace(non_git, git_init=False)
+    rep = upgrade_workspace(non_git)
+    assert rep.committed is False
+
+
+def test_self_upgrade_command_detects_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    ws = tmp_path / "my-ws"
+    init_workspace(ws, git_init=False)
+    non_ws = tmp_path / "not-ws"
+    non_ws.mkdir()
+
+    # Dry-run inside workspace auto-detects workspace
+    assert main(["upgrade", "--root", str(ws), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "uv tool upgrade genealogy-workspace" in out
+    assert "Workspace detected" in out
+    assert "upgrade-workspace" in out
+
+    # Dry-run with --no-workspace skips workspace
+    assert main(["update", "--root", str(ws), "--no-workspace", "--dry-run"]) == 0
+    out_no_ws = capsys.readouterr().out
+    assert "uv tool upgrade genealogy-workspace" in out_no_ws
+    assert "Workspace detected" not in out_no_ws
+
+    # Dry-run outside workspace skips workspace
+    assert main(["upgrade", "--root", str(non_ws), "--dry-run"]) == 0
+    out_non_ws = capsys.readouterr().out
+    assert "Workspace detected" not in out_non_ws
+
+    # Mocked execution: runs uv tool upgrade, then genealogy upgrade-workspace
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        if name == "uv":
+            return "/usr/bin/uv"
+        if name == "genealogy":
+            return "/usr/local/bin/genealogy"
+        return None
+
+    class FakeProc:
+        returncode = 0
+
+    def fake_run(cmd: list[str], **kwargs) -> FakeProc:
+        calls.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr("genealogy.cli.shutil.which", fake_which)
+    monkeypatch.setattr("genealogy.cli.subprocess.run", fake_run)
+
+    assert main(["upgrade", "--root", str(ws), "--no-commit"]) == 0
+    assert calls == [
+        ["/usr/bin/uv", "tool", "upgrade", "genealogy-workspace"],
+        ["/usr/local/bin/genealogy", "upgrade-workspace", "--root", str(ws.resolve()), "--no-commit"],
+    ]
+
+
+def test_self_upgrade_missing_uv(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr("genealogy.cli.shutil.which", lambda _name: None)
+    assert main(["upgrade", "--root", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "uv` not found" in err
+
+
+def test_shell_completion_generation(capsys) -> None:
+    for shell in ("bash", "zsh", "fish"):
+        assert main(["completion", shell]) == 0
+        out = capsys.readouterr().out
+        assert "upgrade-workspace" in out
+        assert "update-workspace" in out
+        assert "upgrade" in out
+        assert "update" in out
+        assert ("-l 'no-commit'" if shell == "fish" else "--no-commit") in out
+
+    # Validate bash script syntax with `bash -n`
+    assert main(["completion", "bash"]) == 0
+    bash_script = capsys.readouterr().out
+    proc = subprocess.run(["bash", "-n"], input=bash_script, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stderr

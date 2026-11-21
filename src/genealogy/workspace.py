@@ -195,6 +195,14 @@ class SyncReport:
     unchanged: list[str] = field(default_factory=list)
     git_initialized: bool = False
     config_updated: bool = False
+    committed: bool = False
+    commit_sha: str | None = None
+
+
+def is_workspace_dir(root: Path | str) -> bool:
+    """Return True if `root` looks like an initialized genealogy workspace."""
+    root_path = Path(root).expanduser().resolve()
+    return (root_path / ".genealogy.yaml").is_file()
 
 
 def _write_config(root: Path, cfg: dict[str, Any]) -> None:
@@ -403,16 +411,54 @@ def ensure_git_clean(root: Path) -> bool:
     return True
 
 
+def _commit_workspace_upgrade(root: Path, toolkit_version: str) -> str | None:
+    """Stage managed workspace files and commit the upgrade. Returns short SHA or None."""
+    targets = [p for p in (".genealogy.yaml", "AGENTS.md", ".agents") if (root / p).exists()]
+    if not targets:
+        return None
+    add_proc = subprocess.run(
+        ["git", "add", "--", *targets],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    if add_proc.returncode != 0:
+        detail = add_proc.stderr.strip() or f"exit code {add_proc.returncode}"
+        raise RuntimeError(f"Failed to stage workspace upgrade in {root}: {detail}")
+
+    msg = f"Upgrade genealogy workspace to toolkit v{toolkit_version}"
+    commit_proc = subprocess.run(
+        ["git", "commit", "-m", msg],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    if commit_proc.returncode != 0:
+        detail = commit_proc.stderr.strip() or commit_proc.stdout.strip() or f"exit code {commit_proc.returncode}"
+        raise RuntimeError(f"Failed to commit workspace upgrade in {root}: {detail}")
+
+    sha_proc = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    return sha_proc.stdout.strip() if sha_proc.returncode == 0 else None
+
+
 def upgrade_workspace(
     root: Path | str,
     *,
     dry_run: bool = False,
     plugin_only: bool | None = None,
     allow_dirty: bool = False,
+    auto_commit: bool = True,
 ) -> SyncReport:
     """Upgrade managed AGENTS.md, skills, and hooks in an existing user research repo.
 
     Never modifies data/, artifacts/, notes/, workspace/, README.md, or AGENTS.local.md.
+    When `auto_commit=True` (default), automatically commits managed updates if the
+    workspace is a clean git repository (skipped for `dry_run`, `allow_dirty`, or non-git dirs).
     """
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
@@ -443,6 +489,13 @@ def upgrade_workspace(
         cfg["agent_mode"] = agent_mode
         _write_config(root_path, cfg)
 
+    committed = False
+    commit_sha: str | None = None
+    has_changes = bool(added or updated or removed or config_updated)
+    if auto_commit and not dry_run and not allow_dirty and has_changes and _is_git_repo(root_path):
+        commit_sha = _commit_workspace_upgrade(root_path, __version__)
+        committed = commit_sha is not None
+
     return SyncReport(
         root=root_path,
         toolkit_version=__version__,
@@ -452,4 +505,6 @@ def upgrade_workspace(
         removed=removed,
         unchanged=unchanged,
         config_updated=config_updated,
+        committed=committed,
+        commit_sha=commit_sha,
     )

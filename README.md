@@ -81,7 +81,14 @@ git push -u origin main
 
 ## Pulling Future Toolkit Updates (Zero Merge Conflicts)
 
-Whenever new skills, validation checks, API integrations, or interactive viewer features are added to this toolkit, update your CLI and refresh your research repo in **two commands**:
+Whenever new skills, validation checks, API integrations, or interactive viewer features are added to this toolkit, update your CLI and refresh your research repo in **one command**:
+
+```bash
+cd ~/my-family-history
+genealogy upgrade   # Upgrades CLI via uv, refreshes workspace, and auto-commits
+```
+
+Or run each step separately (`upgrade` / `update` and `upgrade-workspace` / `update-workspace` are aliases):
 
 ```bash
 # 1. Pull the latest CLI + bundled skills/hooks/rules from GitHub
@@ -249,7 +256,9 @@ Unlike a web chat where the conversation thread *is* your memory, here **your Gi
 | Command | Purpose |
 | :--- | :--- |
 | `genealogy init [DIR] [--regions auto\|mexico,us] [--lfs] [--artifacts-dir PATH] [--plugin-only]` | Bootstraps a fresh, private family-history Git repo separated from the Python toolkit. |
-| `genealogy upgrade-workspace [--dry-run] [--root DIR]` | Refreshes managed `AGENTS.md`, skills, and hooks after `uv tool upgrade genealogy-workspace` without touching user data. |
+| `genealogy upgrade [--no-commit] [--no-workspace] [--dry-run] [--root DIR]` | Upgrades the `genealogy` CLI via `uv tool upgrade` and automatically refreshes + commits the current workspace if detected (alias: `update`). |
+| `genealogy upgrade-workspace [--no-commit] [--dry-run] [--root DIR]` | Refreshes managed `AGENTS.md`, skills, and hooks after upgrading the CLI and auto-commits on a clean git repo without touching user data (alias: `update-workspace`). |
+| `genealogy completion <bash\|zsh\|fish>` | Prints a zero-dependency shell tab-completion script (e.g., `eval "$(genealogy completion bash)"`). |
 | `genealogy validate [--root DIR] [--strict] [--skip-artifacts] [--json]` | Validates YAML schemas, IDs, referential integrity, artifact SHA-256 hashes (including Git LFS pointers!), `parent_child` DAG acyclicity, biological/chronological sanity, excluded-lead guardrails, and GPS sourcing rules. |
 | `genealogy intake [--root DIR] [--scaffold] [--url URL] [--dry-run]` | Scans `artifacts/` (or configured `artifacts_dir`), computes SHA-256 checksums, flags duplicate downloads of **previously excluded leads**, and scaffolds starter `data/sources/` stubs (optionally auto-parsing `--url` into `links:`). |
 | `genealogy add-link <SOURCE_ID> <URL> [--note TEXT]` | Auto-parses an Ancestry, FamilySearch, Newspapers.com, Find a Grave, Fold3, LoC, NARA, or WikiTree URL and appends it to `data/sources/<SOURCE_ID>.md` with `provider`, `requires_auth`, `accessed`, and extracted record IDs. |
