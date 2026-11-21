@@ -168,13 +168,40 @@ plugin_data = json.loads(plugin_json.read_text(encoding="utf-8"))
 plugin_data["version"] = new_ver
 plugin_json.write_text(json.dumps(plugin_data, indent=2) + "\n", encoding="utf-8")
 
-sys.path.insert(0, str(Path("src").resolve()))
-from genealogy.workspace import promote_pending_upgrade_prompts
+import ast
 
 ws_py = Path("src/genealogy/workspace.py")
-promoted = promote_pending_upgrade_prompts(ws_py, new_ver)
-if promoted:
-    print(f"Promoted {promoted} pending upgrade prompt(s) in {ws_py} to v{new_ver}.")
+ws_text = ws_py.read_text(encoding="utf-8")
+begin_marker = "# --- BEGIN UPGRADE PROMPTS (managed by scripts/release.sh) ---"
+end_marker = "# --- END UPGRADE PROMPTS ---"
+start_idx = ws_text.index(begin_marker)
+end_idx = ws_text.index(end_marker) + len(end_marker)
+block = ws_text[start_idx:end_idx]
+
+ns: dict = {}
+exec(compile(ast.parse(block), str(ws_py), "exec"), ns)
+pending = list(ns.get("PENDING_UPGRADE_PROMPTS", []))
+released = list(ns.get("UPGRADE_DATA_PROMPTS", []))
+if pending:
+    ver_tuple = tuple(int(p) for p in new_ver.split(".")[:3])
+    for title, prompt in pending:
+        released.append((ver_tuple, title, prompt))
+    lines = [
+        begin_marker,
+        "PENDING_UPGRADE_PROMPTS: list[tuple[str, str]] = []",
+        "",
+        "UPGRADE_DATA_PROMPTS: list[tuple[tuple[int, ...], str, str]] = [",
+    ]
+    for vt, title, prompt in released:
+        lines.append("    (")
+        lines.append(f"        {vt!r},")
+        lines.append(f"        {title!r},")
+        lines.append(f"        {prompt!r},")
+        lines.append("    ),")
+    lines.append("]")
+    lines.append(end_marker)
+    ws_py.write_text(ws_text[:start_idx] + "\n".join(lines) + ws_text[end_idx:], encoding="utf-8")
+    print(f"Promoted {len(pending)} pending upgrade prompt(s) in {ws_py} to v{new_ver}.")
 PY
 
 if command -v uv >/dev/null 2>&1; then
