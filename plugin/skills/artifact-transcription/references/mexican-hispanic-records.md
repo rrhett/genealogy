@@ -48,6 +48,7 @@ Often the deepest surviving record group in Mexico, frequently intact back to th
      - The **drawn family tree (*árbol genealógico*)** inside the file—trace every intermediate ancestor and cross-check against `genealogy kinship <A> <B>`!
      - **Sworn witness depositions (*testigos*):** Often elderly neighbors (ages 60–80) stating how long they knew the couple's parents and grandparents, plus exact *rancho* or *hacienda* locations.
      - Stated justification (*causa de dispensa*, e.g., *angustia loci* / small village, *conservación de bienes* / preservation of family property, *pobreza*).
+   - **Schema modeling:** Record *Informaciones* / *Dispensas Matrimoniales* in `events:` as `type: marriage_investigation` (reserving `type: marriage` in `events:` strictly for the actual *Matrimonio* / *desposorio*). Keep the couple's `type: marriage` edge in `data/relationships.yaml` (using `date: "aft <investigation_date>"` and `confidence: probable` if the marriage register itself has not been found yet).
 
 3. ***Matrimonios* (Marriages — `record_type: church`):**
    - Distinguish ***desposorio*** (marriage contract/vows) from ***velación*** (nuptial blessing/mass—sometimes months or years later!).
@@ -60,7 +61,7 @@ Often the deepest surviving record group in Mexico, frequently intact back to th
 ### B. Mexican Civil Registration (*Registro Civil*, 1859/1867–Present)
 Established nationwide by the *Leyes de Reforma* (July 1859), with widespread compliance accelerating after **1867** (varying by state and rural *municipio*).
 - ***Actas de Nacimiento* (Births — `record_type: vital`):** Usually name the informant (often the father or grandfather), child's birth date/time/rancho, parents' ages/birthplaces/occupations, **both sets of grandparents** (noting whether living or *finado*), and two witnesses. Watch for late registrations filed months or years after birth!
-- ***Presentación Matrimonial* & *Matrimonio Civil*:** Often more detailed than church marriages; includes witnesses' ages, occupations, and addresses (FAN Club!).
+- ***Presentación Matrimonial* & *Matrimonio Civil*:** Often more detailed than church marriages; includes witnesses' ages, occupations, and addresses (FAN Club!). Record the *Presentación* as `type: marriage_investigation` and the *Matrimonio Civil* as `type: marriage` in `events:`.
 - ***Actas de Defunción*:** Record informant (check `information_type: mixed`—death date/cause is primary, while deceased's age, birthplace, and parents' names are secondary!), spouse, surviving children, and burial cemetery.
 
 ### C. 1930 Mexican National Census (*Censo de Población de 1930*)

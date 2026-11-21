@@ -73,10 +73,13 @@ def build_timeline_markdown(
         add_entry(ind.birth.date, "Birth", f"Birth of {ind.primary_name}", ind.birth.place, ind.birth.sources)
 
     for ev in ind.events:
-        desc = ev.description or ev.type.replace("_", " ").title()
+        ev_label = ev.type.replace("_", " ").title()
+        if ev.type == "other" and ev.suggested_label:
+            ev_label = f"Other ({ev.suggested_label})"
+        desc = ev.description or ev_label
         if ev.tract:
             desc = f"{desc} [Tract: {ev.tract}]"
-        add_entry(ev.date, ev.type.title(), desc, ev.place, ev.sources)
+        add_entry(ev.date, ev_label, desc, ev.place, ev.sources)
 
     if ind.death:
         add_entry(ind.death.date, "Death", f"Death of {ind.primary_name}", ind.death.place, ind.death.sources)

@@ -103,3 +103,89 @@ def test_export_gedcom_redacts_living_by_default_and_roundtrips(tmp_path: Path) 
     assert reimported.individuals_imported == 9
     val = validate_dataset(reimported.destination)
     assert val.errors == []
+
+
+def test_export_gedcom_marriage_investigation_and_suggested_label(tmp_path: Path) -> None:
+    import yaml
+
+    def _fm(meta: dict) -> str:
+        return f"---\n{yaml.safe_dump(meta, sort_keys=False)}---\n"
+
+    (tmp_path / "data" / "individuals").mkdir(parents=True)
+    (tmp_path / "data" / "sources").mkdir(parents=True)
+
+    (tmp_path / "data" / "sources" / "S-1826-CHURCH-INFO.md").write_text(
+        _fm(
+            {
+                "id": "S-1826-CHURCH-INFO",
+                "title": "Informacion Matrimonial 1826",
+                "record_type": "church",
+                "individuals_cited": ["I-SANCHEZ-VICENTE-1807", "I-GONZALEZ-MARIA-1812"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "individuals" / "I-SANCHEZ-VICENTE-1807.md").write_text(
+        _fm(
+            {
+                "id": "I-SANCHEZ-VICENTE-1807",
+                "primary_name": "Vicente Sanchez",
+                "sex": "M",
+                "events": [
+                    {
+                        "type": "marriage_investigation",
+                        "date": "1826-11-19",
+                        "place": "Jalisco, Mexico",
+                        "description": "Informacion Matrimonial",
+                        "sources": ["S-1826-CHURCH-INFO"],
+                    },
+                    {
+                        "type": "other",
+                        "date": "1815-05-01",
+                        "description": "Parish confirmation",
+                        "suggested_label": "confirmation",
+                        "sources": ["S-1826-CHURCH-INFO"],
+                    },
+                ],
+                "status": "tentative",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "individuals" / "I-GONZALEZ-MARIA-1812.md").write_text(
+        _fm(
+            {
+                "id": "I-GONZALEZ-MARIA-1812",
+                "primary_name": "Maria Gonzalez",
+                "sex": "F",
+                "status": "tentative",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "relationships.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "relationships": [
+                    {
+                        "type": "marriage",
+                        "person_1": "I-SANCHEZ-VICENTE-1807",
+                        "person_2": "I-GONZALEZ-MARIA-1812",
+                        "date": "aft 1826-11-19",
+                        "confidence": "probable",
+                        "sources": ["S-1826-CHURCH-INFO"],
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    out_ged = tmp_path / "out.ged"
+    export_gedcom(tmp_path, out_ged)
+    text = out_ged.read_text(encoding="utf-8")
+    assert "1 EVEN\n2 TYPE Marriage Investigation\n2 DATE 19 NOV 1826" in text
+    assert "2 NOTE Informacion Matrimonial" in text
+    assert "1 EVEN\n2 TYPE confirmation\n2 DATE 1 MAY 1815" in text
+    assert text.count("1 MARR") == 1

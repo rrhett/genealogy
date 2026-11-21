@@ -176,3 +176,159 @@ def test_land_tracts_and_dna_corroboration() -> None:
     )
     assert dna_unexp["expected_cm"] == 0.0
     assert dna_unexp["assessment"] == "unexplained_match"
+
+
+def test_marriage_investigation_gaps(tmp_path: Path) -> None:
+    import yaml
+
+    def _fm(meta: dict) -> str:
+        return f"---\n{yaml.safe_dump(meta, sort_keys=False)}---\n"
+
+    (tmp_path / "data" / "individuals").mkdir(parents=True)
+    (tmp_path / "data" / "sources").mkdir(parents=True)
+
+    (tmp_path / "data" / "sources" / "S-1826-CHURCH-INFO.md").write_text(
+        _fm(
+            {
+                "id": "S-1826-CHURCH-INFO",
+                "title": "Informacion Matrimonial 1826",
+                "record_type": "church",
+                "jurisdiction": "Jalisco, Mexico",
+                "individuals_cited": ["I-SANCHEZ-VICENTE-1807", "I-GONZALEZ-MARIA-1812"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "sources" / "S-1840-CHURCH-MATR.md").write_text(
+        _fm(
+            {
+                "id": "S-1840-CHURCH-MATR",
+                "title": "Matrimonio 1840",
+                "record_type": "church",
+                "jurisdiction": "Jalisco, Mexico",
+                "individuals_cited": ["I-SANCHEZ-VICENTE-1807", "I-LOPEZ-JUANA-1820"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Vicente had two marriages:
+    # 1) 1826 investigation with Maria (no ceremony found yet -> SHOULD flag)
+    # 2) 1840 investigation + 1840 marriage with Juana (ceremony found -> should NOT flag)
+    (tmp_path / "data" / "individuals" / "I-SANCHEZ-VICENTE-1807.md").write_text(
+        _fm(
+            {
+                "id": "I-SANCHEZ-VICENTE-1807",
+                "primary_name": "Vicente Sanchez",
+                "sex": "M",
+                "birth": {"date": "1807", "place": "Jalisco, Mexico", "sources": ["S-1826-CHURCH-INFO"]},
+                "events": [
+                    {
+                        "type": "marriage_investigation",
+                        "date": "1826-11-19",
+                        "place": "Jalisco, Mexico",
+                        "description": "Informacion Matrimonial with Maria Gonzalez",
+                        "sources": ["S-1826-CHURCH-INFO"],
+                    },
+                    {
+                        "type": "marriage_investigation",
+                        "date": "1840-01-10",
+                        "place": "Jalisco, Mexico",
+                        "description": "Informacion Matrimonial with Juana Lopez",
+                        "sources": ["S-1840-CHURCH-MATR"],
+                    },
+                    {
+                        "type": "marriage",
+                        "date": "1840-02-05",
+                        "place": "Jalisco, Mexico",
+                        "description": "Matrimonio with Juana Lopez",
+                        "sources": ["S-1840-CHURCH-MATR"],
+                    },
+                ],
+                "status": "tentative",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "individuals" / "I-GONZALEZ-MARIA-1812.md").write_text(
+        _fm(
+            {
+                "id": "I-GONZALEZ-MARIA-1812",
+                "primary_name": "Maria Gonzalez",
+                "sex": "F",
+                "birth": {"date": "1812", "place": "Jalisco, Mexico", "sources": ["S-1826-CHURCH-INFO"]},
+                "status": "tentative",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "individuals" / "I-LOPEZ-JUANA-1820.md").write_text(
+        _fm(
+            {
+                "id": "I-LOPEZ-JUANA-1820",
+                "primary_name": "Juana Lopez",
+                "sex": "F",
+                "birth": {"date": "1820", "place": "Jalisco, Mexico", "sources": ["S-1840-CHURCH-MATR"]},
+                "status": "tentative",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "data" / "individuals" / "I-SOLO-PEDRO-1810.md").write_text(
+        _fm(
+            {
+                "id": "I-SOLO-PEDRO-1810",
+                "primary_name": "Pedro Solo",
+                "sex": "M",
+                "events": [
+                    {
+                        "type": "marriage_investigation",
+                        "date": "1832-04-01",
+                        "place": "Jalisco, Mexico",
+                        "sources": ["S-1826-CHURCH-INFO"],
+                    }
+                ],
+                "status": "tentative",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (tmp_path / "data" / "relationships.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "relationships": [
+                    {
+                        "type": "marriage",
+                        "person_1": "I-SANCHEZ-VICENTE-1807",
+                        "person_2": "I-GONZALEZ-MARIA-1812",
+                        "date": "aft 1826-11-19",
+                        "confidence": "probable",
+                        "sources": ["S-1826-CHURCH-INFO"],
+                    },
+                    {
+                        "type": "marriage",
+                        "person_1": "I-SANCHEZ-VICENTE-1807",
+                        "person_2": "I-LOPEZ-JUANA-1820",
+                        "date": "1840-02-05",
+                        "confidence": "proven",
+                        "sources": ["S-1840-CHURCH-MATR", "S-1826-CHURCH-INFO"],
+                    },
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    gaps = compute_research_gaps(tmp_path)
+    mgaps = gaps["marriage_ceremony_gaps"]
+    assert len(mgaps) == 2
+    assert mgaps[0]["person_1"] == "I-SANCHEZ-VICENTE-1807"
+    assert mgaps[0]["person_2"] == "I-GONZALEZ-MARIA-1812"
+    assert mgaps[0]["investigation_date"] == "1826-11-19"
+    assert "Partida de Matrimonio" in mgaps[0]["recommended_record"]
+
+    assert mgaps[1]["person_1"] == "I-SOLO-PEDRO-1810"
+    assert mgaps[1]["person_2"] is None
+    assert mgaps[1]["investigation_date"] == "1832-04-01"

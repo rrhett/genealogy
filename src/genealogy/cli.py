@@ -616,6 +616,23 @@ def _cmd_gaps(args: argparse.Namespace) -> int:
             for ded in rc.get("deductions", []):
                 print(f"      * [{ded['code']}] {ded['message']}")
 
+    if gaps.get("marriage_ceremony_gaps"):
+        print(f"\nMarriage Investigations Missing Ceremony Record: {len(gaps['marriage_ceremony_gaps'])}")
+        for mg in gaps["marriage_ceremony_gaps"]:
+            if mg.get("person_2"):
+                couple = f"{mg['person_1_name']} ({mg['person_1']}) & {mg['person_2_name']} ({mg['person_2']})"
+            else:
+                couple = f"{mg['person_1_name']} ({mg['person_1']})"
+            inv_dt = mg.get("investigation_date") or "?"
+            rel_info = (
+                f", relationship: {mg['relationship_date'] or '?'} [{mg['relationship_confidence']}]"
+                if mg.get("relationship_confidence")
+                else ""
+            )
+            print(f"  - {couple} (investigation: {inv_dt}{rel_info})")
+            if mg.get("recommended_record"):
+                print(f"    Tip: {mg['recommended_record']}")
+
     print(f"\nPending Sources: {len(gaps['pending_sources'])} | Excluded Leads: {len(gaps['excluded_sources'])}")
     for ex in gaps["excluded_sources"]:
         print(f"  - [EXCLUDED] {ex['source_id']}: {ex['title']} ({ex['exclusion_reason']})")

@@ -160,3 +160,30 @@ def test_individual_marriage_event() -> None:
         ],
     )
     assert ind.events[0].type == "marriage"
+
+
+def test_marriage_investigation_and_suggested_label() -> None:
+    ind = IndividualFrontmatter(
+        id="I-SANCHEZ-VICENTE-1807",
+        primary_name="Vicente Sánchez",
+        events=[
+            LifeEvent(
+                type="marriage_investigation",
+                date="1826-11-19",
+                place="San Juan de los Lagos, Jalisco, Mexico",
+                description="Información Matrimonial with María González",
+                sources=["S-1826-CHURCH-SANCHEZ-INFO"],
+            ),
+            LifeEvent(
+                type="other",
+                date="1815-05-01",
+                place="San Juan de los Lagos, Jalisco, Mexico",
+                description="Confirmation",
+                suggested_label="confirmation",
+                sources=["S-1815-CHURCH-CONFIRMACION"],
+            ),
+        ],
+    )
+    assert ind.events[0].type == "marriage_investigation"
+    assert ind.events[1].type == "other"
+    assert ind.events[1].suggested_label == "confirmation"

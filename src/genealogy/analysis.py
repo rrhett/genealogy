@@ -769,6 +769,114 @@ def compute_research_gaps(
         if ev.status in ("narrowed", "open", "violated")
     ]
 
+    def _has_matching_marriage_event(events: list[Any], inv_date_str: str | None) -> bool:
+        inv_d = parse_genealogy_date(inv_date_str) if inv_date_str else None
+        for ev in events:
+            if ev.type != "marriage":
+                continue
+            if inv_d is None or inv_d.year_min is None:
+                return True
+            m_d = parse_genealogy_date(ev.date) if ev.date else None
+            if m_d is None or m_d.year_min is None:
+                return True
+            if 0 <= (m_d.year_min - inv_d.year_min) <= 3:
+                return True
+        return False
+
+    def _marriage_ceremony_tip(regs: list[str]) -> str:
+        if "mexico" in regs:
+            return (
+                "Locate Catholic parish marriage record (Partida de Matrimonio) or "
+                "Registro Civil (Acta de Matrimonio, 1859+) following the marriage investigation."
+            )
+        return "Locate marriage ceremony record (marriage certificate, register, or return) following the marriage investigation."
+
+    marriage_ceremony_gaps: list[dict[str, Any]] = []
+    covered_investigations: set[tuple[str, str | None]] = set()
+
+    for rel in ds.relationships:
+        if rel.type != "marriage":
+            continue
+        p1 = ds.individuals.get(rel.person_1)
+        p2 = ds.individuals.get(rel.person_2)
+        if not p1 or not p2:
+            continue
+        if p1.data.status == "excluded" or p2.data.status == "excluded":
+            continue
+
+        inv_1 = [(rel.person_1, ev) for ev in p1.data.events if ev.type == "marriage_investigation"]
+        inv_2 = [(rel.person_2, ev) for ev in p2.data.events if ev.type == "marriage_investigation"]
+        all_inv = inv_1 + inv_2
+        if not all_inv:
+            continue
+
+        combined_events = list(p1.data.events) + list(p2.data.events)
+        unmatched = [
+            (pid, ev)
+            for pid, ev in all_inv
+            if not _has_matching_marriage_event(combined_events, ev.date)
+        ]
+        if not unmatched:
+            continue
+
+        for pid, ev in unmatched:
+            covered_investigations.add((pid, ev.date))
+
+        rel_is_exact_proven = (
+            rel.confidence == "proven"
+            and bool(rel.date)
+            and not rel.date.startswith(("aft ", "abt ", "est ", "bef ", "bet "))
+        )
+        if rel_is_exact_proven:
+            continue
+
+        rep_ev = unmatched[0][1]
+        r1 = detect_individual_regions(ds, rel.person_1, regions_override=regions)
+        r2 = detect_individual_regions(ds, rel.person_2, regions_override=regions)
+        merged_regs = sorted(set(r1) | set(r2))
+        if "general" in merged_regs and len(merged_regs) > 1:
+            merged_regs = [r for r in merged_regs if r != "general"]
+        marriage_ceremony_gaps.append(
+            {
+                "person_1": rel.person_1,
+                "person_1_name": p1.data.primary_name,
+                "person_2": rel.person_2,
+                "person_2_name": p2.data.primary_name,
+                "investigation_date": rep_ev.date,
+                "investigation_place": rep_ev.place,
+                "relationship_date": rel.date,
+                "relationship_confidence": rel.confidence,
+                "regions": merged_regs,
+                "recommended_record": _marriage_ceremony_tip(merged_regs),
+            }
+        )
+
+    for iid, ind in sorted(ds.individuals.items()):
+        if ind.data.status == "excluded":
+            continue
+        for ev in ind.data.events:
+            if ev.type != "marriage_investigation":
+                continue
+            if (iid, ev.date) in covered_investigations:
+                continue
+            if _has_matching_marriage_event(ind.data.events, ev.date):
+                continue
+            ind_regs = detect_individual_regions(ds, iid, regions_override=regions)
+            marriage_ceremony_gaps.append(
+                {
+                    "person_1": iid,
+                    "person_1_name": ind.data.primary_name,
+                    "person_2": None,
+                    "person_2_name": None,
+                    "investigation_date": ev.date,
+                    "investigation_place": ev.place,
+                    "relationship_date": None,
+                    "relationship_confidence": None,
+                    "regions": ind_regs,
+                    "recommended_record": _marriage_ceremony_tip(ind_regs),
+                }
+            )
+
     return {
         "root": str(ds.root),
         "census_gaps": census_gaps,
@@ -779,6 +887,7 @@ def compute_research_gaps(
         "excluded_sources": excluded_sources,
         "consanguineous_marriages": consanguineous,
         "relationship_constraints": constraint_gaps,
+        "marriage_ceremony_gaps": marriage_ceremony_gaps,
     }
 
 

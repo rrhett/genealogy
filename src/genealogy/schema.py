@@ -205,6 +205,7 @@ EventType = Literal[
     "land",
     "education",
     "marriage",
+    "marriage_investigation",
     "other",
 ]
 
@@ -219,6 +220,7 @@ class LifeEvent(BaseModel):
     place: str | None = None
     tract: str | None = None
     description: str | None = None
+    suggested_label: str | None = None
     sources: list[str] = Field(default_factory=list)
 
     @field_validator("date", mode="before")

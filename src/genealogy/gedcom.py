@@ -829,13 +829,20 @@ def export_gedcom(
                 val = f" {ev.description}" if (tag == "OCCU" and ev.description) else ""
                 lines.append(f"1 {tag}{val}")
                 if tag == "EVEN":
-                    lines.append(f"2 TYPE {ev.type}")
+                    if ev.type == "other" and ev.suggested_label:
+                        lines.append(f"2 TYPE {ev.suggested_label}")
+                    elif ev.type == "marriage_investigation":
+                        lines.append("2 TYPE Marriage Investigation")
+                    else:
+                        lines.append(f"2 TYPE {ev.type}")
                 if ev.date:
                     pd = parse_genealogy_date(ev.date)
                     if pd:
                         lines.append(f"2 DATE {pd.to_gedcom()}")
                 if ev.place:
                     lines.append(f"2 PLAC {ev.place}")
+                if tag != "OCCU" and ev.description:
+                    lines.append(f"2 NOTE {ev.description}")
                 for sid in ev.sources:
                     if sid in src_xref:
                         lines.append(f"2 SOUR {src_xref[sid]}")

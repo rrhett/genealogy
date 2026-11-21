@@ -1334,7 +1334,7 @@ function getSearchMatches() {
       ...(ind.name_variants || []),
       ind.birth?.place || "",
       ind.death?.place || "",
-      ...(ind.events || []).map(e => `${e.place || ""} ${e.tract || ""} ${e.description || ""}`),
+      ...(ind.events || []).map(e => `${e.place || ""} ${e.tract || ""} ${e.description || ""} ${e.suggested_label || ""}`),
       ind.body_markdown || "",
     ].join(" ").toLowerCase();
     if (hay.includes(q)) matches.add(id);
@@ -1907,7 +1907,8 @@ function renderDrawer() {
     const tb = el("tbody");
     for (const ev of ind.events) {
       const detail = [ev.description, ev.tract ? `Tract: ${ev.tract}` : null, ev.place].filter(Boolean).join(" — ");
-      tb.appendChild(el("tr", {}, el("td", {}, ev.date || "—"), el("td", {}, ev.type), el("td", {}, detail)));
+      const evType = ev.type === "other" && ev.suggested_label ? `other (${ev.suggested_label})` : ev.type.replace(/_/g, " ");
+      tb.appendChild(el("tr", {}, el("td", {}, ev.date || "—"), el("td", {}, evType), el("td", {}, detail)));
     }
     tbl.appendChild(tb);
     drawer.appendChild(tbl);

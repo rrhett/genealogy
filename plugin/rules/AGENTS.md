@@ -70,11 +70,12 @@ death:
   place: "Newport, Cocke County, Tennessee, USA"
   sources: ["S-1954-DEATH-WEST-CLAUDE"]
 events:                          # Optional chronological events beyond birth/death
-  - type: residence              # residence | occupation | military | immigration | naturalization | burial | baptism | census | probate | land | education | marriage | other
+  - type: residence              # residence | occupation | military | immigration | naturalization | burial | baptism | census | probate | land | education | marriage | marriage_investigation | other
     date: "1910-04-22"
     place: "Civil District 4, Cocke County, Tennessee, USA"
     tract: ""                    # Optional land parcel / watercourse identifier for land & probate events
     description: "Farmer, head of household"
+    suggested_label: ""          # Optional snake_case label ONLY when type is "other" (e.g., "confirmation") for future schema upgrades
     sources: ["S-1910-CENSUS-WEST-COCKE-TN"]
 external_ids:                    # Optional links to online trees (leads only)
   familysearch: "LXYZ-123"
@@ -142,7 +143,7 @@ relationships:
     notes: ""
     custom: {}                   # Optional user-defined metadata (see below)
 ```
-> **Marriages:** Always record known spouse links in `data/relationships.yaml` (`type: marriage` with `date`, `end_date`, `place`, `confidence`, `sources`) so graph tools (`tree`, `view`, `kinship`, `gaps`, `export-gedcom`) see the couple. You may also record `type: marriage` in an individual's `events:` list for personal event details (e.g., age, witnesses, ceremony details, or when the spouse is not yet identified/linked).
+> **Marriages vs. Marriage Investigations:** Always record known spouse links in `data/relationships.yaml` (`type: marriage` with `date`, `end_date`, `place`, `confidence`, `sources`) so graph tools (`tree`, `view`, `kinship`, `gaps`, `export-gedcom`) see the couple. In an individual's `events:` list, reserve `type: marriage` strictly for the actual ceremony or civil *acta*, and use `type: marriage_investigation` for pre-marital proceedings (*Informaciones Matrimoniales*, *Presentaciones*, *Dispensas*, banns, or marriage bonds/licenses). If only the investigation file survives, keep the `type: marriage` edge in `data/relationships.yaml` (using `date: "aft <investigation_date>"` and `confidence: probable`) so relationship tools stay accurate while `genealogy gaps` flags the missing ceremony record.
 
 ```yaml
 constraints:                     # Optional deductive relationship constraints (e.g., from dispensas matrimoniales)
@@ -160,13 +161,15 @@ constraints:                     # Optional deductive relationship constraints (
     notes: "Dispensa states a grandparent of the bride is a great-grandparent of the groom."
 ```
 
-### Custom Fields, Out-of-Schema Data & Toolkit Feedback
+### Custom Fields, Out-of-Schema Data & Proactive Toolkit Feedback
 Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown keys to catch typos). When the user wants to track information that does not cleanly fit any native field, `events` type, or `relationships` type:
-1. **Check Native Fields First:** Before treating data as out-of-schema, verify whether an existing field, `events` (`type: other`), or `relationships` (`fan_associate` + `notes`) already covers it.
-2. **Warn & Prompt (Never Silently Drop or Invent Keys):** Tell the user explicitly what the current schema does not natively model, and ask how they want to store it:
+1. **Check Native Fields First:** Before treating data as out-of-schema, verify whether an existing field, `events` type, or `relationships` type (`fan_associate` + `notes`) already covers it.
+2. **Never Shoehorn Into the Wrong Event Type:** Never force an event into a mismatched `events[].type` (for example, never store a marriage under `residence`, a marriage investigation under `marriage`, or a confirmation under `baptism`). Misusing event types corrupts timelines, exports, and gap detection.
+3. **Use `type: other` + `suggested_label` (or `custom:` / Prose) & Warn the User:** When data genuinely does not fit any native `events[].type` or field, tell the user explicitly what the current schema does not natively model and store it cleanly:
+   - **`events` with `type: other` + `suggested_label:`** (e.g., `type: other`, `suggested_label: "confirmation"`, `description: "..."`) for chronological events not yet in `EventType`. Recording `suggested_label` makes it easy to locate and migrate those entries automatically once the toolkit adds native support.
    - **`custom:` map** (available on `IndividualFrontmatter`, `SourceFrontmatter`, and `Relationship`, e.g. `custom: { godparents: ["..."] }`) for structured, machine-readable attributes clearly marked as non-canonical.
    - **Markdown body** (e.g., `## Additional Notes` in `data/individuals/<ID>.md` or `data/sources/<ID>.md`) for freeform narrative details.
-3. **Log Gaps Locally (Opt-In & Privacy-Safe):** With the user's permission, record recurring or high-value schema/tooling gaps in `workspace/TOOLKIT_FEEDBACK.md` (noting *what* they wanted to track and *how* it was stored in `custom:` or prose). Never transmit repo data anywhere; if the user chooses to share feedback upstream later, strip all personal names, dates, places, and citations so only the abstract use case is shared.
+4. **Proactively Offer Toolkit Feedback (Opt-In & Privacy-Safe):** Whenever you have to fall back to `type: other` + `suggested_label`, `custom:`, or a workaround because the schema, CLI, or export lacks native support, **do not just silently work around it**—proactively offer to log a privacy-safe feature/schema request in `workspace/TOOLKIT_FEEDBACK.md` (noting *what* the user wanted to track, *why* current tooling/schema falls short, and *how* it was temporarily stored). Never transmit repo data anywhere; strip all personal names, dates, places, and citations so only the abstract use case is logged.
 
 ---
 

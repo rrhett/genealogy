@@ -189,6 +189,12 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
 
         # Events before birth or after death (excluding burial/probate after death)
         for ev in ind.data.events:
+            if ev.suggested_label and ev.type != "other":
+                add_warning(
+                    "SUGGESTED_LABEL_ON_NON_OTHER",
+                    f"Individual '{iid}' event '{ev.type}' sets suggested_label='{ev.suggested_label}', which is only intended for type='other'",
+                    ind.path,
+                )
             ev_date = parse_genealogy_date(ev.date)
             if not ev_date:
                 continue

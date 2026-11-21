@@ -202,3 +202,41 @@ def test_excluded_source_guardrails(tmp_path: Path) -> None:
     report = validate_dataset(tmp_path)
     assert "EXCLUDED_SOURCE_CITED" in {e.code for e in report.errors}
     assert "MISSING_EXCLUSION_REASON" in {w.code for w in report.warnings}
+
+
+def test_suggested_label_warning_on_non_other(tmp_path: Path) -> None:
+    _write_src(
+        tmp_path,
+        {
+            "id": "S-1826-CHURCH-INFO",
+            "title": "Informacion Matrimonial",
+            "record_type": "church",
+            "individuals_cited": ["I-TEST-JUAN-1800"],
+        },
+    )
+    _write_ind(
+        tmp_path,
+        {
+            "id": "I-TEST-JUAN-1800",
+            "primary_name": "Juan Test",
+            "events": [
+                {
+                    "type": "other",
+                    "date": "1812",
+                    "description": "Confirmation",
+                    "suggested_label": "confirmation",
+                    "sources": ["S-1826-CHURCH-INFO"],
+                },
+                {
+                    "type": "residence",
+                    "date": "1820",
+                    "suggested_label": "should_warn",
+                    "sources": ["S-1826-CHURCH-INFO"],
+                },
+            ],
+            "status": "tentative",
+        },
+    )
+    report = validate_dataset(tmp_path)
+    warn_codes = [w.code for w in report.warnings]
+    assert warn_codes.count("SUGGESTED_LABEL_ON_NON_OTHER") == 1
