@@ -70,7 +70,7 @@ death:
   place: "Newport, Cocke County, Tennessee, USA"
   sources: ["S-1954-DEATH-WEST-CLAUDE"]
 events:                          # Optional chronological events beyond birth/death
-  - type: residence              # residence | occupation | military | immigration | naturalization | burial | baptism | census | probate | land | education | other
+  - type: residence              # residence | occupation | military | immigration | naturalization | burial | baptism | census | probate | land | education | marriage | other
     date: "1910-04-22"
     place: "Civil District 4, Cocke County, Tennessee, USA"
     tract: ""                    # Optional land parcel / watercourse identifier for land & probate events
@@ -141,7 +141,10 @@ relationships:
     sources: ["S-1900-CENSUS-WEST-COCKE-TN", "S-1954-DEATH-WEST-CLAUDE"]
     notes: ""
     custom: {}                   # Optional user-defined metadata (see below)
+```
+> **Marriages:** Always record known spouse links in `data/relationships.yaml` (`type: marriage` with `date`, `end_date`, `place`, `confidence`, `sources`) so graph tools (`tree`, `view`, `kinship`, `gaps`, `export-gedcom`) see the couple. You may also record `type: marriage` in an individual's `events:` list for personal event details (e.g., age, witnesses, ceremony details, or when the spouse is not yet identified/linked).
 
+```yaml
 constraints:                     # Optional deductive relationship constraints (e.g., from dispensas matrimoniales)
   - id: RC-1865-GARCIA-LOPEZ     # Optional constraint identifier
     type: common_ancestor        # common_ancestor | consanguinity | affinity

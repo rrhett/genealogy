@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from genealogy.schema import (
     IndividualFrontmatter,
+    LifeEvent,
     Relationship,
     SourceFrontmatter,
     parse_genealogy_date,
@@ -142,3 +143,20 @@ def test_custom_fields_allowed_while_unknown_top_level_keys_forbidden() -> None:
             primary_name="Claude West",
             unexpected_key="should fail",  # type: ignore[call-arg]
         )
+
+
+def test_individual_marriage_event() -> None:
+    ind = IndividualFrontmatter(
+        id="I-WEST-CLAUDE-1886",
+        primary_name="Claude West",
+        events=[
+            LifeEvent(
+                type="marriage",
+                date="1908-06-14",
+                place="Cocke County, Tennessee, USA",
+                description="Married Octa Rainwater",
+                sources=["S-1908-MARRIAGE-WEST-RAINWATER"],
+            )
+        ],
+    )
+    assert ind.events[0].type == "marriage"
