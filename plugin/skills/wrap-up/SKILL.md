@@ -32,3 +32,4 @@ Give the user a concise summary covering:
 - **Key Findings & Open Questions:** What was proved, what conflicts remain, and any new leads.
 - **Next Up:** Top priorities in `workspace/TODO.md`.
 - **Suggested Commit:** A ready-to-run `git add -A && git commit -m "..."` command summarizing the session.
+- **Fresh Chat Reminder:** End with a one-line note that everything is safely saved to `data/` and `workspace/`, and suggest starting a **new chat** (with `/status`) for the next session or family branch to save quota and keep analysis sharp.

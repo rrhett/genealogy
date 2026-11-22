@@ -43,3 +43,4 @@ If the user approves the rename, run `genealogy rename-artifact` first so the ca
 
 ### 5. Validate
 - Run `genealogy validate` and fix any schema, hash, biological, or referential errors before finishing.
+- **Session hygiene check:** If this is the 3rd+ `/ingest` in the current chat (or the conversation is getting long), append a brief one-line tip reminding the user that everything is saved in `data/` and suggesting `/wrap-up` followed by a **new chat** (with `/status`) before the next batch to keep transcription accuracy high and save quota.
