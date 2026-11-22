@@ -21,8 +21,10 @@ from genealogy.analysis import (
     compute_kinship,
     compute_land_tracts,
     compute_pedigree_collapse,
+    compute_place_profile,
     detect_individual_regions,
     find_consanguineous_marriages,
+    list_places_summary,
 )
 from genealogy.loader import Dataset, load_dataset
 from genealogy.schema import parse_genealogy_date
@@ -499,6 +501,8 @@ def build_viewer_payload(
                     entry["primary_name"] = "Living (Redacted)"
                 entry["description"] = scrub(entry["description"])
 
+    places_raw = [_redact_place_profile(compute_place_profile(ds, pid), ds, scrub, redact_living) for pid in sorted(ds.places)]
+
     # Compute dynamic era slider bounds from dataset years (supports colonial 1600s trees!)
     all_years = [
         y
@@ -526,15 +530,57 @@ def build_viewer_payload(
                 "relationships": len(ds.relationships),
                 "consanguineous_marriages": len(consanguineous_list),
                 "tracts": len(tracts_raw),
+                "places": len(places_raw),
             },
+            "focal_person_id": ds.focal_person_id,
         },
         "individuals": individuals_out,
         "sources": sources_out,
         "relationships": relationships_out,
         "consanguineous_marriages": [r.to_dict() for r in consanguineous_list],
         "tracts": tracts_raw,
+        "places": places_raw,
         "layout": layout,
     }
+
+
+def _redact_place_profile(
+    profile: dict[str, Any],
+    ds: Dataset,
+    scrub: Any,
+    redact_living: bool,
+) -> dict[str, Any]:
+    """Redact living individuals inside a place profile dictionary."""
+    if not redact_living:
+        return profile
+    living_ids = {iid for iid, ind in ds.individuals.items() if ind.data.living}
+    if profile.get("root_id") in living_ids:
+        profile["root_name"] = "Living (Redacted)"
+    for ind in profile.get("individuals", []):
+        if ind["id"] in living_ids:
+            ind["primary_name"] = "Living (Redacted)"
+            ind["birth_date"] = None
+            ind["death_date"] = None
+    for c in profile.get("couples", []):
+        if c["person_1"] in living_ids:
+            c["person_1_name"] = "Living (Redacted)"
+        if c["person_2"] in living_ids:
+            c["person_2_name"] = "Living (Redacted)"
+    for f in profile.get("fan_links", []):
+        if f["person_1"] in living_ids:
+            f["person_1_name"] = "Living (Redacted)"
+        if f["person_2"] in living_ids:
+            f["person_2_name"] = "Living (Redacted)"
+    for ev in profile.get("events", []):
+        if ev["individual_id"] in living_ids:
+            ev["individual_name"] = "Living (Redacted)"
+            ev["date"] = None
+        ev["description"] = scrub(ev.get("description") or "")
+    for person in profile.get("people", []):
+        if person.get("individual_id") in living_ids:
+            person["name"] = "Living (Redacted)"
+    profile["body"] = scrub(profile.get("body") or "")
+    return profile
 
 
 _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -1028,6 +1074,9 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     <select id="tract-filter" aria-label="Land tract filter">
       <option value="">All Land Tracts</option>
     </select>
+    <select id="place-filter" aria-label="Place / Community filter">
+      <option value="">All Places / Communities</option>
+    </select>
     <div class="era-bar">
       <label><input id="era-enabled" type="checkbox"> Era</label>
       <label class="sr-only" for="era-slider">Filter by year</label>
@@ -1095,6 +1144,9 @@ const state = {
   redactLiving: INITIAL_DATA ? !!INITIAL_DATA.meta.redact_living : true,
   focusMode: "all",
   selectedTract: "",
+  selectedPlace: "",
+  placeFocalId: INITIAL_DATA?.meta?.focal_person_id || "",
+  placeProfile: null,
   eraEnabled: false,
   eraYear: 1910,
   searchQuery: "",
@@ -1393,12 +1445,21 @@ function getTractMatchSet() {
   return tr ? new Set(tr.individuals_involved) : new Set();
 }
 
+function getPlaceMatchSet() {
+  if (!state.selectedPlace) return null;
+  const pl = state.placeProfile && state.placeProfile.id === state.selectedPlace
+    ? state.placeProfile
+    : (state.data.places || []).find(p => p.id === state.selectedPlace);
+  return pl ? new Set((pl.individuals || []).map(i => i.id)) : new Set();
+}
+
 function renderGraph() {
   const data = state.data;
   const layout = data.layout;
   const visible = getVisibleIds();
   const searchMatches = getSearchMatches();
   const tractMatches = getTractMatchSet();
+  const placeMatches = getPlaceMatchSet();
   const eraActive = state.eraEnabled;
   const eraYear = state.eraYear;
   const { pathNodes, pathPairs, multiPathBadges } = getHighlightedSets();
@@ -1508,6 +1569,7 @@ function renderGraph() {
     if (
       (searchMatches && !searchMatches.has(iid)) ||
       (tractMatches && !tractMatches.has(iid)) ||
+      (placeMatches && !placeMatches.has(iid)) ||
       (eraActive && !aliveNow) ||
       (hasHighlight && !pathNodes.has(iid) && state.selectedId !== iid && state.compareId !== iid)
     ) {
@@ -1792,6 +1854,103 @@ function renderDrawer() {
       }
     }
 
+    if (state.selectedPlace) {
+      const pl = (state.placeProfile && state.placeProfile.id === state.selectedPlace)
+        ? state.placeProfile
+        : (state.data.places || []).find(p => p.id === state.selectedPlace);
+      if (pl) {
+        drawer.appendChild(el("h2", {}, `${pl.name}`));
+        const aliasStr = pl.aliases?.length ? ` · Aliases: ${pl.aliases.join(", ")}` : "";
+        drawer.appendChild(el("div", { className: "source-meta" }, `${pl.place_type} · ${pl.status}${aliasStr}`));
+
+        // Focal / Root Person selector for kinship overlay
+        const focalWrap = el("div", { style: "margin: 0.6rem 0; display: flex; gap: 0.5rem; align-items: center;" });
+        focalWrap.appendChild(el("label", { for: "place-focal-select", style: "font-size:0.82rem; font-weight:600;" }, "Focal Person:"));
+        const focalSel = el("select", { id: "place-focal-select", style: "flex:1; font-size:0.82rem;" });
+        focalSel.appendChild(el("option", { value: "" }, "(None — show all residents)"));
+        for (const iid of Object.keys(state.data.individuals || {}).sort()) {
+          const ind = state.data.individuals[iid];
+          focalSel.appendChild(el("option", { value: iid }, `${ind.primary_name} (${iid})`));
+        }
+        focalSel.value = state.placeFocalId || "";
+        focalSel.addEventListener("change", async (e) => {
+          state.placeFocalId = e.target.value;
+          await loadPlaceProfile(state.selectedPlace, state.placeFocalId);
+          renderDrawer();
+        });
+        focalWrap.appendChild(focalSel);
+        drawer.appendChild(focalWrap);
+
+        if (pl.jurisdiction_history?.length) {
+          drawer.appendChild(el("h3", {}, "Jurisdiction History"));
+          for (const j of pl.jurisdiction_history) {
+            const parts = [j.period, j.civil, j.ecclesiastical, j.note].filter(Boolean);
+            drawer.appendChild(el("div", { className: "source-meta" }, `• ${parts.join(" | ")}`));
+          }
+        }
+
+        if (pl.people?.length) {
+          drawer.appendChild(el("h3", {}, "Associated People (Place Profile)"));
+          for (const person of pl.people) {
+            const meta = [person.period, person.role].filter(Boolean).join(" · ");
+            const row = el("div", { className: "source-meta" });
+            if (person.individual_id && state.data.individuals[person.individual_id]) {
+              row.appendChild(el("button", { className: "jump-link", onClick: () => onNodeClick(person.individual_id, false) }, person.name));
+              if (meta) row.appendChild(document.createTextNode(` (${meta})`));
+            } else {
+              row.textContent = meta ? `${person.name} (${meta})` : person.name;
+            }
+            drawer.appendChild(row);
+          }
+        }
+
+        drawer.appendChild(el("h3", {}, `Associated Individuals (${(pl.individuals || []).length})`));
+        const catLabels = {
+          self: "Focal Person",
+          direct_ancestor: "Direct Ancestor",
+          direct_descendant: "Direct Descendant",
+          collateral: "Collateral Relative",
+          spouse: "Spouse",
+          fan_or_unrelated: "FAN / Unrelated Neighbor",
+        };
+        const tbl = el("table", { className: "tl" },
+          el("thead", {}, el("tr", {}, el("th", {}, "Person"), el("th", {}, "Roles"), el("th", {}, "Kinship")))
+        );
+        const tb = el("tbody");
+        for (const ind of (pl.individuals || [])) {
+          let kinText = "—";
+          if (ind.kinship) {
+            kinText = `${catLabels[ind.kinship.category] || ind.kinship.category}: ${ind.kinship.label}`;
+          } else if (state.placeFocalId && state.data.individuals[state.placeFocalId]) {
+            const k = ind.id === state.placeFocalId ? { label: "focal person (self)" } : computeClientKinship(state.placeFocalId, ind.id);
+            kinText = k?.paths?.length ? k.paths[0].label : (k?.are_married ? "spouse" : (k?.label || "FAN / unrelated"));
+          }
+          tb.appendChild(el("tr", {},
+            el("td", {}, el("button", { className: "jump-link", onClick: () => onNodeClick(ind.id, false) }, ind.primary_name)),
+            el("td", {}, (ind.roles || []).join(", ")),
+            el("td", {}, kinText)
+          ));
+        }
+        tbl.appendChild(tb);
+        drawer.appendChild(tbl);
+
+        if (pl.couples?.length) {
+          drawer.appendChild(el("h3", {}, `Couples / Marriages (${pl.couples.length})`));
+          for (const c of pl.couples) {
+            drawer.appendChild(el("div", { className: "source-meta" }, `• ${c.person_1_name} + ${c.person_2_name} (${c.date || "undated"})`));
+          }
+        }
+
+        if (pl.sources?.length) {
+          drawer.appendChild(el("h3", {}, `Sources (${pl.sources.length})`));
+          for (const s of pl.sources) {
+            if (state.data.sources[s.id]) drawer.appendChild(renderSourceCard(state.data.sources[s.id]));
+          }
+        }
+        return;
+      }
+    }
+
     drawer.appendChild(el("h2", {}, "Workspace Overview"));
     drawer.appendChild(el("p", {}, "Click any person card to inspect notes, discrepancies, sources, Ancestry/FamilySearch links, and pedigree collapse. Shift+Click a second person (or use Compare Kinship) to trace every blood path between them."));
 
@@ -2036,6 +2195,35 @@ function populateTractFilter() {
   sel.value = prev;
 }
 
+function populatePlaceFilter() {
+  const sel = document.getElementById("place-filter");
+  if (!sel) return;
+  const prev = state.selectedPlace;
+  sel.replaceChildren(el("option", { value: "" }, "All Places / Communities"));
+  for (const pl of (state.data.places || [])) {
+    sel.appendChild(el("option", { value: pl.id }, `Place: ${pl.name} (${(pl.individuals || []).length})`));
+  }
+  sel.value = prev;
+}
+
+async function loadPlaceProfile(placeId, focalId) {
+  if (!placeId) {
+    state.placeProfile = null;
+    return;
+  }
+  if (STANDALONE_MODE) {
+    state.placeProfile = (state.data.places || []).find(p => p.id === placeId) || null;
+    return;
+  }
+  const r = state.redactLiving ? "1" : "0";
+  const params = new URLSearchParams({ id: placeId, redact_living: r });
+  if (focalId) params.set("root", focalId);
+  const resp = await fetch(`/api/place?${params.toString()}`);
+  if (resp.ok) {
+    state.placeProfile = await resp.json();
+  }
+}
+
 function exportSvg() {
   const orig = document.getElementById("graph");
   const clone = orig.cloneNode(true);
@@ -2099,12 +2287,15 @@ async function reloadFromServer() {
   if (!resp.ok) return;
   state.data = await resp.json();
   populateTractFilter();
+  populatePlaceFilter();
+  if (state.selectedPlace) await loadPlaceProfile(state.selectedPlace, state.placeFocalId);
   renderGraph();
   renderDrawer();
 }
 
 function initToolbar() {
   populateTractFilter();
+  populatePlaceFilter();
 
   const searchInput = document.getElementById("search-input");
   searchInput.addEventListener("input", (e) => {
@@ -2127,7 +2318,21 @@ function initToolbar() {
   });
   document.getElementById("tract-filter").addEventListener("change", (e) => {
     state.selectedTract = e.target.value;
-    if (state.selectedTract) { state.selectedId = null; state.selectedHubId = null; }
+    if (state.selectedTract) { state.selectedId = null; state.selectedHubId = null; state.selectedPlace = ""; document.getElementById("place-filter").value = ""; }
+    renderGraph();
+    renderDrawer();
+  });
+  document.getElementById("place-filter").addEventListener("change", async (e) => {
+    state.selectedPlace = e.target.value;
+    if (state.selectedPlace) {
+      state.selectedId = null;
+      state.selectedHubId = null;
+      state.selectedTract = "";
+      document.getElementById("tract-filter").value = "";
+      await loadPlaceProfile(state.selectedPlace, state.placeFocalId);
+    } else {
+      state.placeProfile = null;
+    }
     renderGraph();
     renderDrawer();
   });
@@ -2295,6 +2500,27 @@ def make_viewer_server(
                 try:
                     rep = compute_pedigree_collapse(root_path, iid)
                     self._send_json(rep.to_dict())
+                except KeyError as exc:
+                    self._send_json({"error": str(exc)}, status=404)
+                return
+
+            if path == "/api/places":
+                self._send_json(list_places_summary(root_path))
+                return
+
+            if path == "/api/place":
+                pid = qs.get("id", [None])[0]
+                if not pid:
+                    self._send_json({"error": "Parameter 'id' is required"}, status=400)
+                    return
+                root_ind = qs.get("root", [None])[0]
+                redact_q = qs.get("redact_living", [None])[0]
+                redact_val = redact_living if redact_q is None else (redact_q != "0")
+                try:
+                    ds_live = load_dataset(root_path)
+                    profile = compute_place_profile(ds_live, pid, root_id=root_ind)
+                    scrub_fn = _build_living_redactor(ds_live)
+                    self._send_json(_redact_place_profile(profile, ds_live, scrub_fn, redact_val))
                 except KeyError as exc:
                     self._send_json({"error": str(exc)}, status=404)
                 return

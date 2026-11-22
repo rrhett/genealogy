@@ -62,4 +62,5 @@ Before logging a negative search, verify whether fires, floods, or wars destroye
 
 ## Step 4: Document Jurisdictional Findings
 - Log confirmed boundary shifts, civil/parish start dates, and archive-loss gaps in `workspace/HYPOTHESES.md` and `workspace/NEGATIVE_SEARCHES.md`.
+- For recurring *ranchos*, *haciendas*, estates, or parishes where multiple families, owners, and *compadres* cluster across generations, promote the locality summary and `jurisdiction_history` into a canonical `data/places/<PLACE_ID>.md` profile and inspect community ties with `genealogy places <PLACE_ID> [--focal <INDIVIDUAL_ID>]`.
 - Never claim negative evidence from a destroyed record series or pre-registration era; record the gap explicitly as an **unavailable source**, not proof of absence.

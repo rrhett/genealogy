@@ -14,6 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # Identifier patterns matching AGENTS.md
 INDIVIDUAL_ID_RE = re.compile(r"^I-[A-Z0-9]+(?:-[A-Z0-9]+)*-(?:\d{4}|UNKNOWN)(?:-\d{2})?$")
 SOURCE_ID_RE = re.compile(r"^S-(?:\d{4}|UNDATED)-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
+PLACE_ID_RE = re.compile(r"^P-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
+
+
+def _validate_optional_place_id(v: str | None) -> str | None:
+    if v is None or v == "":
+        return None
+    if not PLACE_ID_RE.match(v):
+        raise ValueError(f"Invalid place ID '{v}'. Expected P-<SLUG>.")
+    return v
 
 # Genealogical date patterns:
 #   YYYY, YYYY-MM, YYYY-MM-DD
@@ -173,7 +182,13 @@ class VitalEvent(BaseModel):
 
     date: str | None = None
     place: str | None = None
+    place_id: str | None = None
     sources: list[str] = Field(default_factory=list)
+
+    @field_validator("place_id")
+    @classmethod
+    def validate_place_id(cls, v: str | None) -> str | None:
+        return _validate_optional_place_id(v)
 
     @field_validator("date", mode="before")
     @classmethod
@@ -218,10 +233,16 @@ class LifeEvent(BaseModel):
     type: EventType
     date: str | None = None
     place: str | None = None
+    place_id: str | None = None
     tract: str | None = None
     description: str | None = None
     suggested_label: str | None = None
     sources: list[str] = Field(default_factory=list)
+
+    @field_validator("place_id")
+    @classmethod
+    def validate_place_id(cls, v: str | None) -> str | None:
+        return _validate_optional_place_id(v)
 
     @field_validator("date", mode="before")
     @classmethod
@@ -343,6 +364,7 @@ class SourceFrontmatter(BaseModel):
     record_type: RecordType
     date: str | None = None
     jurisdiction: str | None = None
+    place_id: str | None = None
     repository: str | None = None
     url: str | None = None
     links: list[SourceLink] = Field(default_factory=list)
@@ -364,6 +386,11 @@ class SourceFrontmatter(BaseModel):
                 f"Invalid source ID '{v}'. Expected S-<YEAR|UNDATED>-<TYPE>-<SLUG>."
             )
         return v
+
+    @field_validator("place_id")
+    @classmethod
+    def validate_place_id(cls, v: str | None) -> str | None:
+        return _validate_optional_place_id(v)
 
     @field_validator("date", mode="before")
     @classmethod
@@ -410,6 +437,7 @@ class Relationship(BaseModel):
     date: str | None = None
     end_date: str | None = None
     place: str | None = None
+    place_id: str | None = None
     confidence: ConfidenceLevel = "speculative"
     sources: list[str] = Field(default_factory=list)
     notes: str = ""
@@ -421,6 +449,11 @@ class Relationship(BaseModel):
         if not INDIVIDUAL_ID_RE.match(v):
             raise ValueError(f"Invalid individual ID '{v}'")
         return v
+
+    @field_validator("place_id")
+    @classmethod
+    def validate_place_id(cls, v: str | None) -> str | None:
+        return _validate_optional_place_id(v)
 
     @field_validator("date", "end_date", mode="before")
     @classmethod
@@ -501,6 +534,110 @@ class RelationshipsFile(BaseModel):
 
     relationships: list[Relationship] = Field(default_factory=list)
     constraints: list[RelationshipConstraint] = Field(default_factory=list)
+
+
+PlaceType = Literal[
+    "rancho",
+    "hacienda",
+    "estate",
+    "parish",
+    "town",
+    "city",
+    "county",
+    "municipio",
+    "state",
+    "region",
+    "other",
+]
+
+
+class PlaceJurisdictionPeriod(BaseModel):
+    """Historical civil/ecclesiastical jurisdiction entry for a place."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    period: str | None = None
+    civil: str | None = None
+    ecclesiastical: str | None = None
+    note: str | None = None
+    sources: list[str] = Field(default_factory=list)
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, v: list[str]) -> list[str]:
+        for sid in v:
+            if not SOURCE_ID_RE.match(sid):
+                raise ValueError(f"Invalid source ID '{sid}'")
+        return v
+
+
+class PlacePerson(BaseModel):
+    """Associated person (owner, resident, laborer, tenant, godparent, etc.) for a place."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    individual_id: str | None = None
+    period: str | None = None
+    role: str | None = None
+    sources: list[str] = Field(default_factory=list)
+
+    @field_validator("individual_id")
+    @classmethod
+    def validate_individual_id(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        if not INDIVIDUAL_ID_RE.match(v):
+            raise ValueError(f"Invalid individual ID '{v}'")
+        return v
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, v: list[str]) -> list[str]:
+        for sid in v:
+            if not SOURCE_ID_RE.match(sid):
+                raise ValueError(f"Invalid source ID '{sid}'")
+        return v
+
+
+class PlaceFrontmatter(BaseModel):
+    """YAML frontmatter schema for data/places/<ID>.md."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    place_type: PlaceType = "other"
+    parent_place: str | None = None
+    jurisdiction_history: list[PlaceJurisdictionPeriod] = Field(default_factory=list)
+    people: list[PlacePerson] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+    status: Literal["confirmed", "tentative", "hypothetical", "excluded"] = "tentative"
+    custom: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str) -> str:
+        if not PLACE_ID_RE.match(v):
+            raise ValueError(f"Invalid place ID '{v}'. Expected P-<SLUG>.")
+        return v
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, v: list[str]) -> list[str]:
+        for sid in v:
+            if not SOURCE_ID_RE.match(sid):
+                raise ValueError(f"Invalid source ID '{sid}'")
+        return v
+
+    def all_source_ids(self) -> set[str]:
+        ids: set[str] = set(self.sources)
+        for j in self.jurisdiction_history:
+            ids.update(j.sources)
+        for person in self.people:
+            ids.update(person.sources)
+        return ids
 
 
 # --- Markdown Frontmatter Helpers ---

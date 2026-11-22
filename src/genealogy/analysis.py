@@ -1247,3 +1247,295 @@ def compute_dna_corroboration(
         "notes": notes,
     }
 
+
+def _place_terms(place_name: str, aliases: list[str]) -> list[str]:
+    """Return deduplicated lowercase matching terms for a place profile."""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in [place_name, *aliases]:
+        t = raw.strip().lower()
+        if t and t not in seen:
+            seen.add(t)
+            terms.append(t)
+    return terms
+
+
+def _place_matches(text: str | None, terms: list[str]) -> bool:
+    """Return True if any canonical place name or alias appears in `text`."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(term in low for term in terms)
+
+
+def _classify_kinship_to_root(
+    ds: Dataset,
+    root_id: str,
+    target_id: str,
+) -> dict[str, Any]:
+    """Classify `target_id`'s relationship to `root_id` for place/community lenses."""
+    if target_id == root_id:
+        return {
+            "category": "self",
+            "label": "focal person (self)",
+            "wright_relationship": 1.0,
+            "path_count": 0,
+        }
+
+    kin = compute_kinship(ds, root_id, target_id)
+    if kin.paths:
+        best = min(kin.paths, key=lambda p: (p.steps_a + p.steps_b, p.steps_a))
+        if best.steps_b == 0 and best.steps_a > 0:
+            category = "direct_ancestor"
+        elif best.steps_a == 0 and best.steps_b > 0:
+            category = "direct_descendant"
+        else:
+            category = "collateral"
+        return {
+            "category": category,
+            "label": best.label,
+            "wright_relationship": round(kin.wright_relationship, 6),
+            "path_count": len(kin.paths),
+        }
+
+    if kin.are_married:
+        return {
+            "category": "spouse",
+            "label": "spouse",
+            "wright_relationship": 0.0,
+            "path_count": 0,
+        }
+
+    is_fan = any(
+        r.type == "fan_associate" and {r.person_1, r.person_2} == {root_id, target_id}
+        for r in ds.relationships
+    )
+    return {
+        "category": "fan_or_unrelated",
+        "label": "FAN associate" if is_fan else "unrelated / neighbor",
+        "wright_relationship": 0.0,
+        "path_count": 0,
+    }
+
+
+def list_places_summary(root: Path | str | Dataset) -> dict[str, Any]:
+    """Return summary metadata and matched counts for all places in `data/places/`."""
+    ds = root if isinstance(root, Dataset) else load_dataset(root)
+    summaries: list[dict[str, Any]] = []
+    for pid in sorted(ds.places):
+        profile = compute_place_profile(ds, pid)
+        summaries.append(
+            {
+                "id": profile["id"],
+                "name": profile["name"],
+                "aliases": profile["aliases"],
+                "place_type": profile["place_type"],
+                "status": profile["status"],
+                "people_count": len(profile["people"]),
+                "individual_count": len(profile["individuals"]),
+                "couple_count": len(profile["couples"]),
+                "event_count": len(profile["events"]),
+                "source_count": len(profile["sources"]),
+            }
+        )
+    return {"place_count": len(summaries), "places": summaries}
+
+
+def compute_place_profile(
+    root: Path | str | Dataset,
+    place_id: str,
+    *,
+    root_id: str | None = None,
+) -> dict[str, Any]:
+    """Aggregate individuals, couples, events, and sources tied to a `data/places/<ID>.md` record."""
+    ds = root if isinstance(root, Dataset) else load_dataset(root)
+    if place_id not in ds.places:
+        raise KeyError(f"Place '{place_id}' not found")
+
+    effective_root = root_id or ds.focal_person_id
+    if effective_root and effective_root not in ds.individuals:
+        raise KeyError(f"Root individual '{effective_root}' not found")
+
+    loaded = ds.places[place_id]
+    p = loaded.data
+    terms = _place_terms(p.name, p.aliases)
+
+    matched_events: list[dict[str, Any]] = []
+    person_roles: dict[str, list[str]] = defaultdict(list)
+    cited_sids: set[str] = set(p.all_source_ids())
+
+    for person in p.people:
+        if person.individual_id and person.individual_id in ds.individuals:
+            role_label = person.role or "associated"
+            if person.period:
+                role_label = f"{role_label} ({person.period})"
+            person_roles[person.individual_id].append(role_label)
+
+    for iid, ind in ds.individuals.items():
+        d = ind.data
+        if d.birth and (d.birth.place_id == place_id or _place_matches(d.birth.place, terms)):
+            person_roles[iid].append("birth")
+            cited_sids.update(d.birth.sources)
+            matched_events.append(
+                {
+                    "individual_id": iid,
+                    "individual_name": d.primary_name,
+                    "event_type": "birth",
+                    "date": d.birth.date,
+                    "place": d.birth.place,
+                    "tract": None,
+                    "description": "Birth",
+                    "sources": list(d.birth.sources),
+                }
+            )
+        if d.death and (d.death.place_id == place_id or _place_matches(d.death.place, terms)):
+            person_roles[iid].append("death")
+            cited_sids.update(d.death.sources)
+            matched_events.append(
+                {
+                    "individual_id": iid,
+                    "individual_name": d.primary_name,
+                    "event_type": "death",
+                    "date": d.death.date,
+                    "place": d.death.place,
+                    "tract": None,
+                    "description": "Death",
+                    "sources": list(d.death.sources),
+                }
+            )
+        for ev in d.events:
+            if (
+                ev.place_id == place_id
+                or _place_matches(ev.place, terms)
+                or _place_matches(ev.tract, terms)
+            ):
+                person_roles[iid].append(ev.type)
+                cited_sids.update(ev.sources)
+                matched_events.append(
+                    {
+                        "individual_id": iid,
+                        "individual_name": d.primary_name,
+                        "event_type": ev.type,
+                        "date": ev.date,
+                        "place": ev.place,
+                        "tract": ev.tract,
+                        "description": ev.description or ev.type,
+                        "sources": list(ev.sources),
+                    }
+                )
+
+    matched_ids = set(person_roles.keys())
+
+    couples: list[dict[str, Any]] = []
+    fan_links: list[dict[str, Any]] = []
+    for rel in ds.relationships:
+        place_hit = rel.place_id == place_id or _place_matches(rel.place, terms)
+        both_here = rel.person_1 in matched_ids and rel.person_2 in matched_ids
+        if rel.type == "marriage" and (place_hit or both_here):
+            if place_hit:
+                if rel.person_1 in ds.individuals:
+                    person_roles[rel.person_1].append("marriage")
+                    matched_ids.add(rel.person_1)
+                if rel.person_2 in ds.individuals:
+                    person_roles[rel.person_2].append("marriage")
+                    matched_ids.add(rel.person_2)
+            cited_sids.update(rel.sources)
+            couples.append(
+                {
+                    "person_1": rel.person_1,
+                    "person_1_name": ds.individuals[rel.person_1].data.primary_name
+                    if rel.person_1 in ds.individuals
+                    else rel.person_1,
+                    "person_2": rel.person_2,
+                    "person_2_name": ds.individuals[rel.person_2].data.primary_name
+                    if rel.person_2 in ds.individuals
+                    else rel.person_2,
+                    "date": rel.date,
+                    "place": rel.place,
+                    "confidence": rel.confidence,
+                    "sources": list(rel.sources),
+                }
+            )
+        elif rel.type == "fan_associate" and (place_hit or both_here):
+            cited_sids.update(rel.sources)
+            fan_links.append(
+                {
+                    "person_1": rel.person_1,
+                    "person_1_name": ds.individuals[rel.person_1].data.primary_name
+                    if rel.person_1 in ds.individuals
+                    else rel.person_1,
+                    "person_2": rel.person_2,
+                    "person_2_name": ds.individuals[rel.person_2].data.primary_name
+                    if rel.person_2 in ds.individuals
+                    else rel.person_2,
+                    "date": rel.date,
+                    "place": rel.place,
+                    "notes": rel.notes,
+                    "sources": list(rel.sources),
+                }
+            )
+
+    # Also include sources whose place_id or jurisdiction mentions the place
+    for sid, src in ds.sources.items():
+        if src.data.place_id == place_id or _place_matches(src.data.jurisdiction, terms):
+            cited_sids.add(sid)
+
+    individuals_out: list[dict[str, Any]] = []
+    for iid in sorted(matched_ids):
+        if iid not in ds.individuals:
+            continue
+        ind = ds.individuals[iid].data
+        roles_unique = list(dict.fromkeys(person_roles[iid]))
+        entry: dict[str, Any] = {
+            "id": iid,
+            "primary_name": ind.primary_name,
+            "sex": ind.sex,
+            "birth_date": ind.birth.date if ind.birth else None,
+            "death_date": ind.death.date if ind.death else None,
+            "status": ind.status,
+            "roles": roles_unique,
+        }
+        if effective_root:
+            entry["kinship"] = _classify_kinship_to_root(ds, effective_root, iid)
+        individuals_out.append(entry)
+
+    def _ev_sort_key(ev: dict[str, Any]) -> tuple[int, int, int, str]:
+        parsed = parse_genealogy_date(ev.get("date"))
+        sk = parsed.sort_key if parsed else (9999, 0, 0)
+        return (*sk, ev.get("individual_id") or "")
+
+    matched_events.sort(key=_ev_sort_key)
+
+    sources_out: list[dict[str, Any]] = []
+    for sid in sorted(cited_sids):
+        if sid in ds.sources:
+            s = ds.sources[sid].data
+            sources_out.append(
+                {
+                    "id": sid,
+                    "title": s.title,
+                    "record_type": s.record_type,
+                    "date": s.date,
+                    "jurisdiction": s.jurisdiction,
+                }
+            )
+
+    return {
+        "id": p.id,
+        "name": p.name,
+        "aliases": list(p.aliases),
+        "place_type": p.place_type,
+        "parent_place": p.parent_place,
+        "status": p.status,
+        "root_id": effective_root,
+        "root_name": ds.individuals[effective_root].data.primary_name if effective_root else None,
+        "jurisdiction_history": [j.model_dump() for j in p.jurisdiction_history],
+        "people": [person.model_dump() for person in p.people],
+        "individuals": individuals_out,
+        "couples": couples,
+        "fan_links": fan_links,
+        "events": matched_events,
+        "sources": sources_out,
+        "body": loaded.body,
+    }
+

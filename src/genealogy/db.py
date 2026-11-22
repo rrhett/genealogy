@@ -93,6 +93,19 @@ CREATE TABLE relationship_constraints (
     notes TEXT NOT NULL
 );
 
+CREATE TABLE places (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL,
+    place_type TEXT NOT NULL,
+    parent_place TEXT,
+    jurisdiction_history_json TEXT NOT NULL,
+    people_json TEXT NOT NULL,
+    sources_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE fts_records USING fts5(
     entity_type,
     entity_id,
@@ -293,6 +306,47 @@ def _populate_connection(conn: sqlite3.Connection, ds: Dataset) -> None:
                 json.dumps(con.sources),
                 con.notes,
             ),
+        )
+
+    for pid, place in ds.places.items():
+        p = place.data
+        conn.execute(
+            """
+            INSERT INTO places (
+                id, name, aliases_json, place_type, parent_place,
+                jurisdiction_history_json, people_json, sources_json, status, body
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                p.id,
+                p.name,
+                json.dumps(p.aliases),
+                p.place_type,
+                p.parent_place,
+                json.dumps([j.model_dump() for j in p.jurisdiction_history]),
+                json.dumps([person.model_dump() for person in p.people]),
+                json.dumps(p.sources),
+                p.status,
+                place.body,
+            ),
+        )
+        searchable = " ".join(
+            part
+            for part in [
+                p.name,
+                *p.aliases,
+                p.place_type,
+                p.parent_place or "",
+                *(j.civil or "" for j in p.jurisdiction_history),
+                *(j.ecclesiastical or "" for j in p.jurisdiction_history),
+                *(person.name for person in p.people),
+                place.body,
+            ]
+            if part
+        )
+        conn.execute(
+            "INSERT INTO fts_records (entity_type, entity_id, title, content) VALUES (?, ?, ?, ?)",
+            ("place", pid, p.name, searchable),
         )
 
     conn.commit()

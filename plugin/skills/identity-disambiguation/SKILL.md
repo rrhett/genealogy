@@ -51,6 +51,7 @@ Evaluate these five discriminator categories before deciding to merge or split:
    - Baptismal godparents/sponsors and church pews
    - Military unit comrades and pension affidavit witnesses
    - Record persistent associates in `data/relationships.yaml` using `type: fan_associate` with clear `notes` explaining the shared record(s).
+   - When multiple families cluster at a recurring *rancho*, *hacienda*, estate, or parish, maintain a `data/places/<PLACE_ID>.md` profile (listing key `people` with roles and `aliases`) and run `genealogy places <PLACE_ID> --focal <INDIVIDUAL_ID>` to separate direct ancestors, collateral kin, and unrelated FAN-club neighbors.
 
 ### 4. Decide: Merge, Split, or Hold Pending Evidence
 

@@ -386,6 +386,7 @@ def init_workspace(
         "workspace",
         "data/individuals",
         "data/sources",
+        "data/places",
     ):
         d = root / rel_dir
         d.mkdir(parents=True, exist_ok=True)

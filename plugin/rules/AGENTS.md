@@ -38,6 +38,7 @@ Adhere strictly to deterministic IDs and YAML frontmatter. Run `genealogy valida
 ### Identifier Format
 - **Individuals:** `I-<SURNAME>-<GIVEN>-<BIRTHYEAR>` (e.g., `I-WEST-CLAUDE-1886`, or for Hispanic double surnames `I-GARCIA-JOSE-1870` using the ASCII-transliterated paternal surname). Use `UNKNOWN` if birth year is completely unknown (`I-WEST-JOHN-UNKNOWN`). Append `-01`, `-02` only if two distinct individuals share the exact same surname, given name, and birth year.
 - **Sources:** `S-<YEAR>-<TYPE>-<SLUG>` (e.g., `S-1910-CENSUS-WEST-COCKE-TN`, `S-1870-CHURCH-GARCIA-BAUTISMO-JALISCO`). Use `UNDATED` if record year is unknown (`S-UNDATED-BIBLE-WEST-FAMILY`).
+- **Places / Localities:** `P-<SLUG>` (e.g., `P-MX-JAL-EL-PALO`, `P-TN-COCKE-DISTRICT-4`).
 - **Artifacts:** Always reference logical relative paths starting with `artifacts/` (e.g., `artifacts/1910_census_cocke_tn_p4a.png`) and record `artifact_sha256` (obtainable via `genealogy intake`). Paths resolve cleanly even when the user stores scans in an external `artifacts_dir`.
 
 ### Genealogical Date Format
@@ -64,15 +65,18 @@ living: false                    # Set true for living individuals (redacted in 
 birth:
   date: "1886-05"
   place: "Cocke County, Tennessee, USA"
+  place_id: ""                     # Optional P-... ID linking to data/places/<ID>.md
   sources: ["S-1900-CENSUS-WEST-COCKE-TN", "S-1917-DRAFT-WEST-CLAUDE"]
 death:
   date: "1954-11-12"
   place: "Newport, Cocke County, Tennessee, USA"
+  place_id: ""                     # Optional P-... ID linking to data/places/<ID>.md
   sources: ["S-1954-DEATH-WEST-CLAUDE"]
 events:                          # Optional chronological events beyond birth/death
   - type: residence              # residence | occupation | military | immigration | naturalization | burial | baptism | census | probate | land | education | marriage | marriage_investigation | other
     date: "1910-04-22"
     place: "Civil District 4, Cocke County, Tennessee, USA"
+    place_id: ""                 # Optional P-... ID linking to data/places/<ID>.md
     tract: ""                    # Optional land parcel / watercourse identifier for land & probate events
     description: "Farmer, head of household"
     suggested_label: ""          # Optional snake_case label ONLY when type is "other" (e.g., "confirmation") for future schema upgrades
@@ -161,6 +165,34 @@ constraints:                     # Optional deductive relationship constraints (
     notes: "Dispensa states a grandparent of the bride is a great-grandparent of the groom."
 ```
 
+### Place / Locality / Estate Files (`data/places/<ID>.md`)
+Filename must match `id` exactly (e.g., `data/places/P-MX-JAL-EL-PALO.md`). Use these for recurring *ranchos*, *haciendas*, estates, parishes, towns, or counties where tracking jurisdiction shifts, owners, and all resident/associated families over time matters:
+
+```yaml
+---
+id: P-MX-JAL-EL-PALO
+name: "Rancho El Palo"
+aliases: ["El Palo", "Palo"]
+place_type: rancho               # rancho | hacienda | estate | parish | town | city | county | municipio | state | region | other
+parent_place: ""                 # Optional parent place ID or name
+jurisdiction_history:
+  - period: "1821-1867"
+    civil: "Cantón de Guadalajara, Jalisco"
+    ecclesiastical: "Parroquia de San Pedro"
+    sources: ["S-1850-CHURCH-BAUTISMO-EL-PALO"]
+people:                          # Optional owners, residents, laborers, tenants, godparents, etc.
+  - name: "Juan Pérez"
+    individual_id: ""            # Optional I-... ID if in data/individuals/
+    period: "1840-1875"
+    role: "dueño"                # e.g., dueño | owner | resident | laborer | tenant | godparent
+    sources: ["S-1850-CHURCH-BAUTISMO-EL-PALO"]
+sources: ["S-1850-CHURCH-BAUTISMO-EL-PALO"]
+status: tentative                # confirmed | tentative | hypothetical | excluded
+---
+## Locality Summary & Community Notes
+Historical context, parish/civil boundary notes, and FAN-club patterns.
+```
+
 ### Custom Fields, Out-of-Schema Data & Proactive Toolkit Feedback
 Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown keys to catch typos). When the user wants to track information that does not cleanly fit any native field, `events` type, or `relationships` type:
 1. **Check Native Fields First:** Before treating data as out-of-schema, verify whether an existing field, `events` type, or `relationships` type (`fan_associate` + `notes`) already covers it.
@@ -192,6 +224,7 @@ Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown
    - `genealogy add-link <SOURCE_ID> <URL>` — Auto-parse and attach Ancestry, FamilySearch, Newspapers.com, Find a Grave, Fold3, LoC, NARA, or WikiTree URLs to a source file.
    - `genealogy stats` — Summarize individuals, sources, relationships, and unlinked artifacts.
    - `genealogy build-db` / `genealogy query "<text>" --fts` — Compile and search SQLite + FTS5.
+   - `genealogy places [<PLACE_ID>] [--focal <INDIVIDUAL_ID>]` — List or aggregate all individuals, couples, events, and sources tied to a `data/places/` profile (with optional kinship classification relative to a focal person).
    - `genealogy timeline <ID> --include-family` — Generate chronological life timelines.
    - `genealogy tree [<ID>] --format mermaid` — Render family graphs.
    - `genealogy view [--port 8765] [--out tree.html]` — Launch local interactive DAG viewer (or export standalone HTML) with pedigree-collapse & kinship-path highlighting, land-tract lens, era/census slider, SVG export, copy citation, Ancestry/FamilySearch links, and inline artifact preview.

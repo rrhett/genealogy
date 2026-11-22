@@ -37,6 +37,7 @@ class ValidationReport:
     individuals_count: int
     sources_count: int
     relationships_count: int
+    places_count: int = 0
     issues: list[ValidationIssue] = field(default_factory=list)
 
     @property
@@ -61,6 +62,7 @@ class ValidationReport:
                 "individuals": self.individuals_count,
                 "sources": self.sources_count,
                 "relationships": self.relationships_count,
+                "places": self.places_count,
             },
             "error_count": len(self.errors),
             "warning_count": len(self.warnings),
@@ -114,6 +116,7 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
         individuals_count=len(ds.individuals),
         sources_count=len(ds.sources),
         relationships_count=len(ds.relationships),
+        places_count=len(ds.places),
     )
 
     def add_error(code: str, msg: str, path: Path | None = None) -> None:
@@ -158,6 +161,20 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
                 f"Individual '{iid}' has no source citations in birth, death, or events",
                 ind.path,
             )
+
+        for ref_pid in (
+            [ind.data.birth.place_id] if ind.data.birth and ind.data.birth.place_id else []
+        ) + (
+            [ind.data.death.place_id] if ind.data.death and ind.data.death.place_id else []
+        ) + [
+            ev.place_id for ev in ind.data.events if ev.place_id
+        ]:
+            if ref_pid not in ds.places:
+                add_error(
+                    "MISSING_PLACE_REF",
+                    f"Individual '{iid}' references unknown place '{ref_pid}'",
+                    ind.path,
+                )
 
         # Living person with death record conflict
         if ind.data.living and ind.data.death is not None:
@@ -239,9 +256,45 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
                     ind.path,
                 )
 
+    # 2b. Referential integrity: Place -> Sources & Owners
+    for pid, place in ds.places.items():
+        place_sids = place.data.all_source_ids()
+        for sid in sorted(place_sids):
+            if sid not in ds.sources:
+                add_error(
+                    "MISSING_SOURCE_REF",
+                    f"Place '{pid}' references unknown source '{sid}'",
+                    place.path,
+                )
+            elif ds.sources[sid].data.relevance == "excluded" and place.data.status != "excluded":
+                add_error(
+                    "EXCLUDED_SOURCE_CITED",
+                    f"Place '{pid}' cites excluded/mistaken-lead source '{sid}'",
+                    place.path,
+                )
+        for person in place.data.people:
+            if person.individual_id and person.individual_id not in ds.individuals:
+                add_error(
+                    "MISSING_INDIVIDUAL_REF",
+                    f"Place '{pid}' person '{person.name}' references unknown individual '{person.individual_id}'",
+                    place.path,
+                )
+        if not place_sids and place.data.status != "excluded":
+            add_warning(
+                "UNSOURCED_PLACE",
+                f"Place '{pid}' has no source citations",
+                place.path,
+            )
+
     # 3. Referential integrity: Sources -> Individuals & Artifacts
     linked_artifacts: set[Path] = set()
     for sid, src in ds.sources.items():
+        if src.data.place_id and src.data.place_id not in ds.places:
+            add_error(
+                "MISSING_PLACE_REF",
+                f"Source '{sid}' references unknown place '{src.data.place_id}'",
+                src.path,
+            )
         for iid in src.data.individuals_cited:
             if iid not in ds.individuals:
                 add_error(
@@ -304,6 +357,12 @@ def validate_loaded_dataset(ds: Dataset, *, skip_artifacts: bool = False) -> Val
     seen_edges: set[tuple[str, str, str]] = set()
 
     for idx, rel in enumerate(ds.relationships, start=1):
+        if rel.place_id and rel.place_id not in ds.places:
+            add_error(
+                "MISSING_PLACE_REF",
+                f"Relationship #{idx} references unknown place '{rel.place_id}'",
+                rel_path,
+            )
         p1, p2 = rel.person_1, rel.person_2
         connected_individuals.add(p1)
         connected_individuals.add(p2)

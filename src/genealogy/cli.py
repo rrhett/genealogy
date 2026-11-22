@@ -22,7 +22,9 @@ from genealogy.analysis import (
     compute_kinship,
     compute_land_tracts,
     compute_pedigree_collapse,
+    compute_place_profile,
     compute_research_gaps,
+    list_places_summary,
 )
 from genealogy.apis.chronicling_america import search_newspapers
 from genealogy.apis.nara import search_nara
@@ -940,6 +942,67 @@ def _cmd_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_places(args: argparse.Namespace) -> int:
+    if args.place_id:
+        try:
+            data = compute_place_profile(args.root, args.place_id, root_id=args.focal)
+        except KeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(data, indent=2))
+            return 0
+        aliases = f" (aliases: {', '.join(data['aliases'])})" if data["aliases"] else ""
+        print(f"Place: {data['name']} [{data['id']}] — {data['place_type']} ({data['status']}){aliases}")
+        if data["root_id"]:
+            print(f"Focal person: {data['root_name']} ({data['root_id']})")
+        if data["jurisdiction_history"]:
+            print("Jurisdiction history:")
+            for j in data["jurisdiction_history"]:
+                parts = [p for p in [j.get("period"), j.get("civil"), j.get("ecclesiastical")] if p]
+                print(f"  - {' | '.join(parts)}")
+        if data["people"]:
+            print("Associated People (listed on place profile):")
+            for person in data["people"]:
+                iid_str = f" [{person['individual_id']}]" if person.get("individual_id") else ""
+                period_str = f" ({person['period']})" if person.get("period") else ""
+                role_str = f" — {person['role']}" if person.get("role") else ""
+                print(f"  - {person['name']}{iid_str}{period_str}{role_str}")
+        print(f"Associated individuals ({len(data['individuals'])}):")
+        for ind in data["individuals"]:
+            kin_str = ""
+            if "kinship" in ind:
+                k = ind["kinship"]
+                kin_str = f" | {k['category']}: {k['label']}"
+            roles = ", ".join(ind["roles"])
+            print(f"  - {ind['primary_name']} ({ind['id']}) [{roles}]{kin_str}")
+        if data["couples"]:
+            print(f"Couples / Marriages ({len(data['couples'])}):")
+            for c in data["couples"]:
+                dt = c["date"] or "undated"
+                print(f"  - {c['person_1_name']} + {c['person_2_name']} ({dt})")
+        if data["sources"]:
+            print(f"Sources ({len(data['sources'])}):")
+            for s in data["sources"]:
+                print(f"  - {s['id']}: {s['title']}")
+        return 0
+
+    summary = list_places_summary(args.root)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+    if not summary["places"]:
+        print("No place profiles found in data/places/.")
+        return 0
+    for p in summary["places"]:
+        print(
+            f"{p['id']} | {p['name']} ({p['place_type']}) | "
+            f"{p['individual_count']} individual(s), {p['couple_count']} couple(s), "
+            f"{p['event_count']} event(s), {p['source_count']} source(s)"
+        )
+    return 0
+
+
 def _cmd_tracts(args: argparse.Namespace) -> int:
     data = compute_land_tracts(args.root, tract_filter=args.tract)
     if args.json:
@@ -1532,6 +1595,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_tracts.add_argument("--tract", default=None, help="Optional substring filter for a specific tract")
     p_tracts.add_argument("--json", action="store_true", help="Output JSON")
     p_tracts.set_defaults(func=_cmd_tracts)
+
+    # places
+    p_places = sub.add_parser("places", help="List or inspect data/places/ locality profiles and associated residents/couples/sources")
+    p_places.add_argument("place_id", nargs="?", default=None, help="Optional place ID (e.g. P-MX-JAL-EL-PALO)")
+    p_places.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+    p_places.add_argument("--focal", "--person", dest="focal", default=None, help="Focal individual ID for kinship classification (defaults to focal_person in .genealogy.yaml)")
+    p_places.add_argument("--json", action="store_true", help="Output JSON")
+    p_places.set_defaults(func=_cmd_places)
 
     # dna
     p_dna = sub.add_parser("dna", help="Endogamy-aware autosomal DNA expected shared cM calculator across all blood paths")

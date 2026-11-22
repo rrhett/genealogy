@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from genealogy.schema import (
     IndividualFrontmatter,
+    PlaceFrontmatter,
     Relationship,
     RelationshipConstraint,
     RelationshipsFile,
@@ -35,6 +36,13 @@ class LoadedSource:
 
 
 @dataclass
+class LoadedPlace:
+    path: Path
+    data: PlaceFrontmatter
+    body: str
+
+
+@dataclass
 class LoadError:
     path: Path
     message: str
@@ -47,6 +55,7 @@ class Dataset:
     root: Path
     individuals: dict[str, LoadedIndividual] = field(default_factory=dict)
     sources: dict[str, LoadedSource] = field(default_factory=dict)
+    places: dict[str, LoadedPlace] = field(default_factory=dict)
     relationships: list[Relationship] = field(default_factory=list)
     constraints: list[RelationshipConstraint] = field(default_factory=list)
     load_errors: list[LoadError] = field(default_factory=list)
@@ -55,6 +64,11 @@ class Dataset:
     @property
     def data_dir(self) -> Path:
         return self.root / "data"
+
+    @property
+    def focal_person_id(self) -> str | None:
+        fp = self.config.get("focal_person")
+        return fp.strip() if isinstance(fp, str) and fp.strip() else None
 
     @property
     def artifacts_dir(self) -> Path:
@@ -144,6 +158,28 @@ def load_dataset(root: Path | str) -> Dataset:
                         )
                     )
                 ds.sources[model.id] = LoadedSource(path=md_path, data=model, body=body)
+            except (ValueError, yaml.YAMLError, ValidationError) as exc:
+                ds.load_errors.append(LoadError(md_path, str(exc)))
+
+    places_dir = ds.data_dir / "places"
+    if places_dir.exists():
+        for md_path in sorted(places_dir.glob("*.md")):
+            try:
+                raw_meta, body = read_markdown_frontmatter(md_path)
+                model = PlaceFrontmatter.model_validate(raw_meta)
+                if model.id in ds.places:
+                    ds.load_errors.append(
+                        LoadError(md_path, f"Duplicate place ID '{model.id}'")
+                    )
+                    continue
+                if md_path.stem != model.id:
+                    ds.load_errors.append(
+                        LoadError(
+                            md_path,
+                            f"Filename '{md_path.name}' does not match frontmatter id '{model.id}'",
+                        )
+                    )
+                ds.places[model.id] = LoadedPlace(path=md_path, data=model, body=body)
             except (ValueError, yaml.YAMLError, ValidationError) as exc:
                 ds.load_errors.append(LoadError(md_path, str(exc)))
 
