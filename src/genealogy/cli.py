@@ -7,7 +7,9 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,10 +36,16 @@ from genealogy.constraints import evaluate_all_constraints
 from genealogy.db import build_sqlite, run_sql_query, search_fts
 from genealogy.gedcom import export_gedcom, import_gedcom
 from genealogy.intake import (
+    GrabScreenshotResult,
+    RecentArtifactCandidate,
+    grab_candidates_by_indices,
+    grab_download,
     grab_screenshot,
+    parse_pick_selection,
     rename_artifact,
     scaffold_unlinked_sources,
     scan_artifacts,
+    suggest_recent_artifacts,
 )
 from genealogy.loader import load_dataset
 from genealogy.timeline import build_timeline_markdown, render_tree
@@ -70,10 +78,159 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.is_valid(strict=args.strict) else 1
 
 
+def _format_mtime(mtime: float) -> str:
+    stamp = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    delta = max(0, int(time.time() - mtime))
+    if delta < 60:
+        age = "just now"
+    elif delta < 3600:
+        age = f"{delta // 60}m ago"
+    elif delta < 86400:
+        age = f"{delta // 3600}h ago"
+    else:
+        age = f"{delta // 86400}d ago"
+    return f"{stamp}, {age}"
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def _candidate_to_dict(c: RecentArtifactCandidate) -> dict[str, Any]:
+    return {
+        "kind": c.kind,
+        "path": str(c.path),
+        "name": c.path.name,
+        "mtime": c.mtime,
+        "size_bytes": c.size_bytes,
+        "already_in_artifacts": c.already_in_artifacts,
+        "existing_rel_path": c.existing_rel_path,
+        "genealogy_hint": c.genealogy_hint,
+        "newer_than_latest_artifact": c.newer_than_latest_artifact,
+        "suggested_command": c.suggested_command,
+    }
+
+
+def _grab_result_to_dict(res: GrabScreenshotResult, *, dry_run: bool) -> dict[str, Any]:
+    return {
+        "source_path": str(res.source_path),
+        "dest_path": str(res.dest_path),
+        "rel_path": res.rel_path,
+        "sha256": res.sha256,
+        "already_exists": res.already_exists,
+        "existing_rel_path": res.existing_rel_path,
+        "excluded_matches": res.excluded_matches,
+        "dry_run": dry_run,
+    }
+
+
+def _print_grab_result(
+    res: GrabScreenshotResult,
+    *,
+    label: str,
+    kind: str,
+    dry_run: bool,
+) -> None:
+    if res.already_exists:
+        print(f"{label} already present in artifacts/: {res.existing_rel_path}")
+        print(f"  Source: {res.source_path}")
+        print(f"  SHA256: {res.sha256}")
+    else:
+        verb = "Would copy" if dry_run else "Copied"
+        print(f"{verb} {kind} -> {res.rel_path}")
+        print(f"  From:   {res.source_path}")
+        print(f"  To:     {res.dest_path}")
+        print(f"  SHA256: {res.sha256}")
+
+    if res.excluded_matches:
+        print(f"WARNING — {label} matches previously EXCLUDED mistaken lead(s):")
+        for m in res.excluded_matches:
+            print(
+                f"  {m['source_id']} (excluded for: {m['excluded_for'] or 'n/a'} — {m['reason']})"
+            )
+
+
+def _print_recent_suggestions(
+    candidates: list[RecentArtifactCandidate],
+    *,
+    header: str,
+    pick_hint: str,
+) -> None:
+    if not candidates:
+        print(
+            "  No recent candidate files found in default Screenshots or Downloads folders "
+            "(use `genealogy grab-screenshot --from <path>` or `genealogy grab-download --from <path>`)."
+        )
+        return
+
+    print(header)
+    for idx, cand in enumerate(candidates, start=1):
+        tags: list[str] = []
+        if cand.already_in_artifacts:
+            tags.append(f"already in {cand.existing_rel_path}")
+        else:
+            if cand.newer_than_latest_artifact:
+                tags.append("newer than artifacts/")
+            if cand.genealogy_hint:
+                tags.append("genealogy match")
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
+        print(
+            f"  {idx}. [{cand.kind}] {cand.path.name} "
+            f"({_format_mtime(cand.mtime)}, {_format_size(cand.size_bytes)}){tag_str}"
+        )
+        print(f"     {cand.path}")
+
+    uncopied = [c for c in candidates if not c.already_in_artifacts]
+    if uncopied:
+        recommended = next(
+            (c for c in uncopied if c.newer_than_latest_artifact and c.genealogy_hint),
+            next(
+                (c for c in uncopied if c.newer_than_latest_artifact),
+                next((c for c in uncopied if c.genealogy_hint), uncopied[0]),
+            ),
+        )
+        rec_idx = candidates.index(recommended) + 1
+        print(f"Suggested copy: {recommended.suggested_command}")
+        print(f"Or copy by number: {pick_hint.format(n=rec_idx)} (e.g. 1,3)")
+    else:
+        print("All recent files above are already present in artifacts/.")
+
+
 def _cmd_intake(args: argparse.Namespace) -> int:
+    if args.pick is not None and args.pick != "":
+        candidates = suggest_recent_artifacts(args.root, limit=5)
+        try:
+            indices = parse_pick_selection(args.pick, len(candidates))
+            results = grab_candidates_by_indices(
+                args.root,
+                indices,
+                kind="all",
+                limit=5,
+                dry_run=args.dry_run,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            print(f"intake --pick error: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps([_grab_result_to_dict(r, dry_run=args.dry_run) for r in results], indent=2))
+            return 0
+        for r in results:
+            _print_grab_result(r, label="Artifact", kind="recent file", dry_run=args.dry_run)
+        if not args.dry_run:
+            report = scan_artifacts(args.root)
+            print(
+                f"\nArtifacts under {report.root / 'artifacts'}: "
+                f"{len(report.artifacts)} total, {len(report.linked)} linked, {len(report.unlinked)} unlinked"
+            )
+        return 0
+
     report = scan_artifacts(args.root)
     if args.json and not args.scaffold:
-        data = {
+        data: dict[str, Any] = {
             "root": str(report.root),
             "total_artifacts": len(report.artifacts),
             "linked_count": len(report.linked),
@@ -92,6 +249,17 @@ def _cmd_intake(args: argparse.Namespace) -> int:
                 for a in report.artifacts
             ],
         }
+        if not report.unlinked:
+            candidates = suggest_recent_artifacts(args.root, limit=5)
+            data["suggestions"] = [_candidate_to_dict(c) for c in candidates]
+            newer = [c for c in candidates if c.newer_than_latest_artifact]
+            if newer:
+                data["newer_candidates"] = [_candidate_to_dict(c) for c in newer]
+        else:
+            candidates = suggest_recent_artifacts(args.root, limit=5)
+            newer = [c for c in candidates if c.newer_than_latest_artifact]
+            if newer:
+                data["newer_candidates"] = [_candidate_to_dict(c) for c in newer]
         print(json.dumps(data, indent=2))
         return 0
 
@@ -139,57 +307,151 @@ def _cmd_intake(args: argparse.Namespace) -> int:
             verb = "Would create" if args.dry_run else "Created"
             for sid, dest in created:
                 print(f"  {verb} {sid} -> {dest}")
+
+    if not report.unlinked:
+        state_msg = (
+            "No artifacts found in artifacts/."
+            if not report.artifacts
+            else "No unlinked artifacts found in artifacts/."
+        )
+        print(
+            f"\n{state_msg} You can pull in a recent file with "
+            "`genealogy grab-screenshot` or `genealogy grab-download`."
+        )
+        candidates = suggest_recent_artifacts(args.root, limit=5)
+        _print_recent_suggestions(
+            candidates,
+            header="Most recent files by timestamp (Screenshots & Downloads):",
+            pick_hint="genealogy intake --pick {n}",
+        )
+        if args.pick == "" and candidates:
+            try:
+                raw_choice = input("Copy which file(s)? (e.g. 1, 1,3, or Enter to skip): ").strip()
+            except EOFError:
+                raw_choice = ""
+            if raw_choice:
+                try:
+                    indices = parse_pick_selection(raw_choice, len(candidates))
+                    results = grab_candidates_by_indices(
+                        args.root,
+                        indices,
+                        kind="all",
+                        limit=5,
+                        dry_run=args.dry_run,
+                    )
+                except (FileNotFoundError, FileExistsError, ValueError) as exc:
+                    print(f"intake --pick error: {exc}", file=sys.stderr)
+                    return 1
+                for r in results:
+                    _print_grab_result(r, label="Artifact", kind="recent file", dry_run=args.dry_run)
+    else:
+        candidates = suggest_recent_artifacts(args.root, limit=5)
+        newer = [c for c in candidates if c.newer_than_latest_artifact]
+        if newer:
+            print(
+                "\nNewer files found in Screenshots/Downloads "
+                "(newer than latest file in artifacts/):"
+            )
+            _print_recent_suggestions(
+                newer,
+                header="Recent files newer than artifacts/:",
+                pick_hint="genealogy intake --pick {n}",
+            )
     return 0
 
 
-def _cmd_grab_screenshot(args: argparse.Namespace) -> int:
+def _cmd_grab_artifact(args: argparse.Namespace, *, kind: str) -> int:
+    cmd_name = f"grab-{kind}"
+    label = "Screenshot" if kind == "screenshot" else "Download"
+
+    if getattr(args, "list_only", False):
+        try:
+            candidates = suggest_recent_artifacts(
+                args.root,
+                kind=kind,
+                limit=5,
+                explicit_from=args.source,
+            )
+        except FileNotFoundError as exc:
+            print(f"{cmd_name} error: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps([_candidate_to_dict(c) for c in candidates], indent=2))
+            return 0
+        _print_recent_suggestions(
+            candidates,
+            header=f"Most recent {kind}s by timestamp:",
+            pick_hint=f"genealogy {cmd_name} {{n}}",
+        )
+        return 0
+
+    pick_tokens: list[str] = []
+    if getattr(args, "pick", None):
+        pick_tokens.append(args.pick)
+    if getattr(args, "picks", None):
+        pick_tokens.extend(args.picks)
+
+    if pick_tokens:
+        try:
+            candidates = suggest_recent_artifacts(
+                args.root,
+                kind=kind,
+                limit=5,
+                explicit_from=args.source,
+            )
+            indices = parse_pick_selection(pick_tokens, len(candidates))
+            results = grab_candidates_by_indices(
+                args.root,
+                indices,
+                kind=kind,
+                limit=5,
+                explicit_from=args.source,
+                name=args.name,
+                dry_run=args.dry_run,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            print(f"{cmd_name} error: {exc}", file=sys.stderr)
+            return 1
+
+        if args.json:
+            payload = (
+                _grab_result_to_dict(results[0], dry_run=args.dry_run)
+                if len(results) == 1
+                else [_grab_result_to_dict(r, dry_run=args.dry_run) for r in results]
+            )
+            print(json.dumps(payload, indent=2))
+            return 0
+
+        for r in results:
+            _print_grab_result(r, label=label, kind=kind, dry_run=args.dry_run)
+        return 0
+
+    grab_fn = grab_screenshot if kind == "screenshot" else grab_download
     try:
-        res = grab_screenshot(
+        res = grab_fn(
             args.root,
             source=args.source,
             name=args.name,
             dry_run=args.dry_run,
         )
     except (FileNotFoundError, FileExistsError, ValueError) as exc:
-        print(f"grab-screenshot error: {exc}", file=sys.stderr)
+        print(f"{cmd_name} error: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "source_path": str(res.source_path),
-                    "dest_path": str(res.dest_path),
-                    "rel_path": res.rel_path,
-                    "sha256": res.sha256,
-                    "already_exists": res.already_exists,
-                    "existing_rel_path": res.existing_rel_path,
-                    "excluded_matches": res.excluded_matches,
-                    "dry_run": args.dry_run,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(_grab_result_to_dict(res, dry_run=args.dry_run), indent=2))
         return 0
 
-    if res.already_exists:
-        print(f"Screenshot already present in artifacts/: {res.existing_rel_path}")
-        print(f"  Source: {res.source_path}")
-        print(f"  SHA256: {res.sha256}")
-    else:
-        verb = "Would copy" if args.dry_run else "Copied"
-        print(f"{verb} latest screenshot -> {res.rel_path}")
-        print(f"  From:   {res.source_path}")
-        print(f"  To:     {res.dest_path}")
-        print(f"  SHA256: {res.sha256}")
-
-    if res.excluded_matches:
-        print("WARNING — Screenshot matches previously EXCLUDED mistaken lead(s):")
-        for m in res.excluded_matches:
-            print(
-                f"  {m['source_id']} (excluded for: {m['excluded_for'] or 'n/a'} — {m['reason']})"
-            )
+    _print_grab_result(res, label=label, kind=f"latest {kind}", dry_run=args.dry_run)
     return 0
+
+
+def _cmd_grab_screenshot(args: argparse.Namespace) -> int:
+    return _cmd_grab_artifact(args, kind="screenshot")
+
+
+def _cmd_grab_download(args: argparse.Namespace) -> int:
+    return _cmd_grab_artifact(args, kind="download")
 
 
 def _cmd_rename_artifact(args: argparse.Namespace) -> int:
@@ -1066,30 +1328,70 @@ def build_parser() -> argparse.ArgumentParser:
     p_in.add_argument("--scaffold", action="store_true", help="Create stub data/sources/ files for unlinked artifacts")
     p_in.add_argument("--url", default=None, help="Optional Ancestry/FamilySearch/archival URL to attach when scaffolding")
     p_in.add_argument("--link-note", default=None, help="Optional note for the --url provenance link")
-    p_in.add_argument("--dry-run", action="store_true", help="Preview scaffolded files without writing")
+    p_in.add_argument(
+        "--pick",
+        nargs="?",
+        const="",
+        default=None,
+        help="Copy numbered recent file(s) from Screenshots/Downloads (e.g. 2 or 1,3; omit value to prompt)",
+    )
+    p_in.add_argument("--dry-run", action="store_true", help="Preview scaffolded or copied files without writing")
     p_in.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_in.set_defaults(func=_cmd_intake)
+
+    def _add_grab_args(parser: argparse.ArgumentParser, source_help: str) -> None:
+        parser.add_argument(
+            "picks",
+            nargs="*",
+            help="Optional 1-based file number(s) from --list to copy (e.g. 2 or 1,3)",
+        )
+        parser.add_argument("--root", default=".", help="Workspace root directory (default: .)")
+        parser.add_argument(
+            "--from",
+            dest="source",
+            default=None,
+            help=source_help,
+        )
+        parser.add_argument(
+            "--name",
+            default=None,
+            help="Optional destination filename inside artifacts/ (preserves extension if omitted)",
+        )
+        parser.add_argument(
+            "--pick",
+            default=None,
+            help="Copy numbered file(s) from --list (e.g. 2 or 1,3)",
+        )
+        parser.add_argument(
+            "--list",
+            dest="list_only",
+            action="store_true",
+            help="List the most recent candidate files by timestamp without copying",
+        )
+        parser.add_argument("--dry-run", action="store_true", help="Preview copy without writing")
+        parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
     # grab-screenshot
     p_grab = sub.add_parser(
         "grab-screenshot",
         help="Find the latest OS screenshot and copy it into artifacts/",
     )
-    p_grab.add_argument("--root", default=".", help="Workspace root directory (default: .)")
-    p_grab.add_argument(
-        "--from",
-        dest="source",
-        default=None,
-        help="Optional screenshot file or directory (auto-detects OS screenshot folders if omitted)",
+    _add_grab_args(
+        p_grab,
+        "Optional screenshot file or directory (auto-detects OS screenshot folders if omitted)",
     )
-    p_grab.add_argument(
-        "--name",
-        default=None,
-        help="Optional destination filename inside artifacts/ (preserves extension if omitted)",
-    )
-    p_grab.add_argument("--dry-run", action="store_true", help="Preview copy without writing")
-    p_grab.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_grab.set_defaults(func=_cmd_grab_screenshot)
+
+    # grab-download
+    p_grab_dl = sub.add_parser(
+        "grab-download",
+        help="Find the latest OS download and copy it into artifacts/",
+    )
+    _add_grab_args(
+        p_grab_dl,
+        "Optional download file or directory (auto-detects OS Downloads folders if omitted)",
+    )
+    p_grab_dl.set_defaults(func=_cmd_grab_download)
 
     # rename-artifact
     p_ren = sub.add_parser(

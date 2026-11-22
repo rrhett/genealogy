@@ -239,8 +239,15 @@ def scaffold_unlinked_sources(
 
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+_DOWNLOAD_EXTENSIONS = _IMAGE_EXTENSIONS | {".pdf", ".txt", ".csv", ".rtf", ".heic", ".avif"}
 _SCREENSHOT_NAME_RE = re.compile(
     r"(?:screenshot|screen[\s_-]?shot|snip|capture|captura|bildschirmfoto|spectacle|flameshot)",
+    re.IGNORECASE,
+)
+_GENEALOGY_HINT_RE = re.compile(
+    r"(?:census|draft|wwi|wwii|military|marriage|birth|death|obit|news|"
+    r"cemetery|grave|will|probate|deed|land|baptism|church|ancestry|"
+    r"familysearch|findagrave|certificate|manifest|passenger|record)",
     re.IGNORECASE,
 )
 
@@ -257,6 +264,19 @@ class GrabScreenshotResult:
 
 
 @dataclass
+class RecentArtifactCandidate:
+    kind: str  # "screenshot" or "download"
+    path: Path
+    mtime: float
+    size_bytes: int
+    already_in_artifacts: bool = False
+    existing_rel_path: str | None = None
+    genealogy_hint: bool = False
+    newer_than_latest_artifact: bool = False
+    suggested_command: str = ""
+
+
+@dataclass
 class RenameArtifactResult:
     old_rel_path: str
     new_rel_path: str
@@ -266,6 +286,11 @@ class RenameArtifactResult:
     updated_sources: list[str] = field(default_factory=list)
 
 
+def _resolve_configured_dir(root: Path, raw: str) -> Path:
+    p = Path(raw).expanduser()
+    return p.resolve() if p.is_absolute() else (root / p).resolve()
+
+
 def _screenshot_search_dirs(
     root: Path,
     config: dict[str, Any],
@@ -273,19 +298,15 @@ def _screenshot_search_dirs(
 ) -> list[tuple[Path, bool]]:
     """Return `(directory, require_screenshot_name)` pairs to search for screenshots."""
     if explicit_from is not None:
-        p = Path(explicit_from).expanduser()
-        resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
-        return [(resolved, False)]
+        return [(_resolve_configured_dir(root, str(explicit_from)), False)]
 
     env_dir = os.environ.get("GENEALOGY_SCREENSHOTS_DIR")
     if env_dir:
-        p = Path(env_dir).expanduser()
-        return [(p.resolve() if p.is_absolute() else (root / p).resolve(), False)]
+        return [(_resolve_configured_dir(root, env_dir), False)]
 
     cfg_dir = config.get("screenshots_dir")
     if isinstance(cfg_dir, str) and cfg_dir.strip():
-        p = Path(cfg_dir.strip()).expanduser()
-        return [(p.resolve() if p.is_absolute() else (root / p).resolve(), False)]
+        return [(_resolve_configured_dir(root, cfg_dir.strip()), False)]
 
     home = Path.home()
     candidates: list[tuple[Path, bool]] = []
@@ -304,6 +325,88 @@ def _screenshot_search_dirs(
     return candidates
 
 
+def _download_search_dirs(
+    root: Path,
+    config: dict[str, Any],
+    explicit_from: Path | str | None = None,
+) -> list[tuple[Path, bool]]:
+    """Return `(directory, require_name)` pairs to search for downloaded artifacts."""
+    if explicit_from is not None:
+        return [(_resolve_configured_dir(root, str(explicit_from)), False)]
+
+    env_dir = os.environ.get("GENEALOGY_DOWNLOADS_DIR")
+    if env_dir:
+        return [(_resolve_configured_dir(root, env_dir), False)]
+
+    cfg_dir = config.get("downloads_dir")
+    if isinstance(cfg_dir, str) and cfg_dir.strip():
+        return [(_resolve_configured_dir(root, cfg_dir.strip()), False)]
+
+    home = Path.home()
+    candidates: list[tuple[Path, bool]] = []
+    xdg_dl = os.environ.get("XDG_DOWNLOAD_DIR")
+    if xdg_dl:
+        candidates.append((Path(xdg_dl).expanduser(), False))
+    candidates.extend(
+        [
+            (home / "Downloads", False),
+            (home / "OneDrive" / "Downloads", False),
+        ]
+    )
+    return candidates
+
+
+def _collect_matching_files(
+    root_path: Path,
+    search_dirs: list[tuple[Path, bool]],
+    extensions: set[str],
+    *,
+    explicit_from: Path | str | None = None,
+    label: str = "Artifact",
+) -> tuple[list[tuple[float, Path]], list[str]]:
+    """Collect matching files sorted newest-first by modification timestamp."""
+    if explicit_from is not None:
+        resolved = _resolve_configured_dir(root_path, str(explicit_from))
+        if resolved.is_file():
+            return [(resolved.stat().st_mtime, resolved)], []
+        if not resolved.exists():
+            raise FileNotFoundError(f"{label} source path does not exist: {resolved}")
+
+    seen_dirs: set[Path] = set()
+    seen_files: set[Path] = set()
+    matches: list[tuple[float, Path]] = []
+    searched: list[str] = []
+
+    for directory, require_name in search_dirs:
+        try:
+            dir_resolved = directory.resolve()
+        except OSError:
+            continue
+        if dir_resolved in seen_dirs or not dir_resolved.is_dir():
+            continue
+        seen_dirs.add(dir_resolved)
+        searched.append(str(directory))
+        try:
+            entries = list(dir_resolved.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_file() or entry.name.startswith("."):
+                continue
+            if entry.suffix.lower() not in extensions:
+                continue
+            if require_name and not _SCREENSHOT_NAME_RE.search(entry.stem):
+                continue
+            resolved_entry = entry.resolve()
+            if resolved_entry in seen_files:
+                continue
+            seen_files.add(resolved_entry)
+            matches.append((entry.stat().st_mtime, resolved_entry))
+
+    matches.sort(key=lambda item: (-item[0], str(item[1])))
+    return matches, searched
+
+
 def find_latest_screenshot(
     root: Path | str,
     config: dict[str, Any] | None = None,
@@ -313,42 +416,41 @@ def find_latest_screenshot(
     """Locate the most recently modified screenshot file from OS or configured folders."""
     root_path = Path(root).resolve()
     cfg = config if config is not None else {}
-
-    if explicit_from is not None:
-        p = Path(explicit_from).expanduser()
-        resolved = p.resolve() if p.is_absolute() else (root_path / p).resolve()
-        if resolved.is_file():
-            return resolved
-        if not resolved.exists():
-            raise FileNotFoundError(f"Screenshot source path does not exist: {resolved}")
-
     search_dirs = _screenshot_search_dirs(root_path, cfg, explicit_from=explicit_from)
-    best_file: Path | None = None
-    best_mtime: float = -1.0
-    searched: list[str] = []
-
-    for directory, require_name in search_dirs:
-        if not directory.is_dir():
-            continue
-        searched.append(str(directory))
-        for entry in directory.iterdir():
-            if not entry.is_file() or entry.name.startswith("."):
-                continue
-            if entry.suffix.lower() not in _IMAGE_EXTENSIONS:
-                continue
-            if require_name and not _SCREENSHOT_NAME_RE.search(entry.stem):
-                continue
-            mtime = entry.stat().st_mtime
-            if mtime > best_mtime or (
-                mtime == best_mtime and best_file is not None and str(entry) < str(best_file)
-            ):
-                best_mtime = mtime
-                best_file = entry.resolve()
-
-    if best_file is None:
+    matches, searched = _collect_matching_files(
+        root_path,
+        search_dirs,
+        _IMAGE_EXTENSIONS,
+        explicit_from=explicit_from,
+        label="Screenshot",
+    )
+    if not matches:
         loc_desc = ", ".join(searched) if searched else "default OS screenshot directories"
         raise FileNotFoundError(f"No screenshot image found in: {loc_desc}")
-    return best_file
+    return matches[0][1]
+
+
+def find_latest_download(
+    root: Path | str,
+    config: dict[str, Any] | None = None,
+    *,
+    explicit_from: Path | str | None = None,
+) -> Path:
+    """Locate the most recently modified download file from OS or configured folders."""
+    root_path = Path(root).resolve()
+    cfg = config if config is not None else {}
+    search_dirs = _download_search_dirs(root_path, cfg, explicit_from=explicit_from)
+    matches, searched = _collect_matching_files(
+        root_path,
+        search_dirs,
+        _DOWNLOAD_EXTENSIONS,
+        explicit_from=explicit_from,
+        label="Download",
+    )
+    if not matches:
+        loc_desc = ", ".join(searched) if searched else "default OS download directories"
+        raise FileNotFoundError(f"No download file found in: {loc_desc}")
+    return matches[0][1]
 
 
 def _normalize_relative_artifact_name(raw_name: str) -> str:
@@ -373,17 +475,14 @@ def _ensure_within_artifacts_dir(ds: Dataset, candidate: Path) -> Path:
     return resolved
 
 
-def grab_screenshot(
-    root: Path | str,
+def _grab_file_to_artifacts(
+    ds: Dataset,
+    src_file: Path,
     *,
-    source: Path | str | None = None,
     name: str | None = None,
     dry_run: bool = False,
 ) -> GrabScreenshotResult:
-    """Find the latest screenshot and copy it into `artifacts/`."""
-    ds = load_dataset(root)
-    src_file = find_latest_screenshot(ds.root, ds.config, explicit_from=source)
-
+    """Copy a source file into `artifacts/` with SHA-256 deduplication and exclusion checks."""
     rel_target: str | None = None
     if name is not None:
         rel_target = _normalize_relative_artifact_name(name)
@@ -448,6 +547,198 @@ def grab_screenshot(
         already_exists=False,
         excluded_matches=excluded_matches,
     )
+
+
+def grab_screenshot(
+    root: Path | str,
+    *,
+    source: Path | str | None = None,
+    name: str | None = None,
+    dry_run: bool = False,
+) -> GrabScreenshotResult:
+    """Find the latest screenshot and copy it into `artifacts/`."""
+    ds = load_dataset(root)
+    src_file = find_latest_screenshot(ds.root, ds.config, explicit_from=source)
+    return _grab_file_to_artifacts(ds, src_file, name=name, dry_run=dry_run)
+
+
+def grab_download(
+    root: Path | str,
+    *,
+    source: Path | str | None = None,
+    name: str | None = None,
+    dry_run: bool = False,
+) -> GrabScreenshotResult:
+    """Find the latest download and copy it into `artifacts/`."""
+    ds = load_dataset(root)
+    src_file = find_latest_download(ds.root, ds.config, explicit_from=source)
+    return _grab_file_to_artifacts(ds, src_file, name=name, dry_run=dry_run)
+
+
+def suggest_recent_artifacts(
+    root: Path | str,
+    *,
+    kind: str = "all",
+    limit: int = 5,
+    explicit_from: Path | str | None = None,
+) -> list[RecentArtifactCandidate]:
+    """Return the most recent files by timestamp from screenshots and/or downloads."""
+    if kind not in {"all", "screenshot", "download"}:
+        raise ValueError(f"Unsupported candidate kind: {kind!r}")
+
+    ds = load_dataset(root)
+    existing_by_sha: dict[str, str] = {}
+    latest_artifact_mtime: float | None = None
+    if ds.artifacts_dir.exists():
+        for existing in sorted(ds.artifacts_dir.rglob("*")):
+            if existing.is_file() and not existing.name.startswith("."):
+                existing_by_sha.setdefault(compute_sha256(existing), ds.logical_artifact_path(existing))
+                art_mtime = existing.stat().st_mtime
+                if latest_artifact_mtime is None or art_mtime > latest_artifact_mtime:
+                    latest_artifact_mtime = art_mtime
+
+    raw_by_path: dict[Path, tuple[float, str]] = {}
+    newest_by_kind: dict[str, Path | None] = {"screenshot": None, "download": None}
+
+    if kind in {"all", "screenshot"}:
+        shot_matches, _ = _collect_matching_files(
+            ds.root,
+            _screenshot_search_dirs(ds.root, ds.config, explicit_from=explicit_from),
+            _IMAGE_EXTENSIONS,
+            explicit_from=explicit_from,
+            label="Screenshot",
+        )
+        if shot_matches:
+            newest_by_kind["screenshot"] = shot_matches[0][1]
+        for mtime, path in shot_matches:
+            raw_by_path[path] = (mtime, "screenshot")
+
+    if kind in {"all", "download"}:
+        dl_matches, _ = _collect_matching_files(
+            ds.root,
+            _download_search_dirs(ds.root, ds.config, explicit_from=explicit_from),
+            _DOWNLOAD_EXTENSIONS,
+            explicit_from=explicit_from,
+            label="Download",
+        )
+        if dl_matches:
+            newest_by_kind["download"] = dl_matches[0][1]
+        for mtime, path in dl_matches:
+            if path in raw_by_path and _SCREENSHOT_NAME_RE.search(path.stem):
+                continue
+            raw_by_path[path] = (mtime, "download")
+
+    sorted_items = sorted(
+        ((mtime, item_kind, path) for path, (mtime, item_kind) in raw_by_path.items()),
+        key=lambda item: (-item[0], str(item[2])),
+    )
+
+    candidates: list[RecentArtifactCandidate] = []
+    for mtime, item_kind, path in sorted_items[: max(limit, 0)]:
+        sha = compute_sha256(path)
+        existing_rel = existing_by_sha.get(sha)
+        cmd_base = "genealogy grab-screenshot" if item_kind == "screenshot" else "genealogy grab-download"
+        if newest_by_kind.get(item_kind) == path and explicit_from is None:
+            suggested_cmd = cmd_base
+        else:
+            suggested_cmd = f'{cmd_base} --from "{path}"'
+
+        already = existing_rel is not None
+        is_newer = (not already) and (
+            latest_artifact_mtime is None or mtime > latest_artifact_mtime
+        )
+
+        candidates.append(
+            RecentArtifactCandidate(
+                kind=item_kind,
+                path=path,
+                mtime=mtime,
+                size_bytes=path.stat().st_size,
+                already_in_artifacts=already,
+                existing_rel_path=existing_rel,
+                genealogy_hint=bool(_GENEALOGY_HINT_RE.search(path.stem)),
+                newer_than_latest_artifact=is_newer,
+                suggested_command=suggested_cmd,
+            )
+        )
+
+    return candidates
+
+
+def parse_pick_selection(raw: str | list[str], max_index: int) -> list[int]:
+    """Parse 1-based selection specs like '2', '1,3', or '1-3' into unique ordered indices."""
+    if max_index <= 0:
+        raise ValueError("No candidate files available to select.")
+    tokens = [raw] if isinstance(raw, str) else list(raw)
+    parts: list[str] = []
+    for tok in tokens:
+        parts.extend(p.strip() for p in tok.replace(",", " ").split() if p.strip())
+    if not parts:
+        raise ValueError("No selection indices provided.")
+
+    indices: list[int] = []
+    seen: set[int] = set()
+    for part in parts:
+        if "-" in part:
+            bounds = part.split("-", 1)
+            if len(bounds) != 2 or not bounds[0].isdigit() or not bounds[1].isdigit():
+                raise ValueError(f"Invalid selection range: '{part}'")
+            start, end = int(bounds[0]), int(bounds[1])
+            if start > end or start < 1 or end > max_index:
+                raise ValueError(f"Selection range '{part}' is out of range (1-{max_index}).")
+            rng = range(start, end + 1)
+        elif part.isdigit():
+            val = int(part)
+            if val < 1 or val > max_index:
+                raise ValueError(f"Selection '{val}' is out of range (1-{max_index}).")
+            rng = range(val, val + 1)
+        else:
+            raise ValueError(f"Invalid selection '{part}': expected a number like 1 or 1,3.")
+        for idx in rng:
+            if idx not in seen:
+                seen.add(idx)
+                indices.append(idx)
+    return indices
+
+
+def grab_candidates_by_indices(
+    root: Path | str,
+    indices: list[int],
+    *,
+    kind: str = "all",
+    limit: int = 5,
+    explicit_from: Path | str | None = None,
+    name: str | None = None,
+    dry_run: bool = False,
+) -> list[GrabScreenshotResult]:
+    """Copy one or more numbered recent candidates (1-based) into `artifacts/`."""
+    if not indices:
+        raise ValueError("No selection indices provided.")
+    if len(indices) > 1 and name is not None:
+        raise ValueError("--name can only be used when copying a single file.")
+
+    effective_limit = max(limit, max(indices))
+    candidates = suggest_recent_artifacts(
+        root,
+        kind=kind,
+        limit=effective_limit,
+        explicit_from=explicit_from,
+    )
+    if not candidates:
+        raise FileNotFoundError("No recent candidate files found to copy.")
+
+    for idx in indices:
+        if idx < 1 or idx > len(candidates):
+            raise ValueError(f"Selection '{idx}' is out of range (1-{len(candidates)}).")
+
+    ds = load_dataset(root)
+    results: list[GrabScreenshotResult] = []
+    for idx in indices:
+        src_file = candidates[idx - 1].path
+        results.append(
+            _grab_file_to_artifacts(ds, src_file, name=name, dry_run=dry_run)
+        )
+    return results
 
 
 def rename_artifact(

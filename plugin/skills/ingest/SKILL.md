@@ -14,8 +14,8 @@ Use this workflow whenever the user drops new scans into `artifacts/`, adds note
 
 ### 1. Audit Context & Unlinked Artifacts
 - Read `AGENTS.local.md` (if present) for focus surnames, regional conventions, and privacy rules.
-- If the user says they just took a screenshot (or asks to pull in their latest screenshot), run `genealogy grab-screenshot` to locate the newest screenshot and copy it into `artifacts/`.
-- Run `genealogy intake` to list unlinked files in `artifacts/` and check SHA-256 checksums against previously excluded leads (`relevance: excluded`).
+- Run `genealogy intake` to list unlinked files in `artifacts/`, check SHA-256 checksums against previously excluded leads (`relevance: excluded`), and automatically detect recent Screenshots/Downloads by timestamp (including any files newer than the latest file in `artifacts/`).
+  - If `genealogy intake` lists suggested recent files from Screenshots or Downloads (either because `artifacts/` has no unlinked files, or because newer files were found during the current session), show the numbered candidates to the user and ask which file(s) to pull into `artifacts/` (e.g., "Would you like me to copy #1 and #2 into `artifacts/`?"). Once confirmed (or if the user already asked to grab their latest screenshot/download), run `genealogy intake --pick <numbers>` (or `genealogy grab-screenshot` / `genealogy grab-download`), then re-run `genealogy intake` to inspect the copied files.
   - If any file matches an excluded lead's SHA-256, alert the user immediately and skip re-transcribing it unless explicitly told otherwise.
 - Check `notes/` for new user context and `RESEARCH_HANDOFF.md` if present.
 

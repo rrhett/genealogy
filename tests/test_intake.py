@@ -10,10 +10,12 @@ import pytest
 
 from genealogy.cli import main
 from genealogy.intake import (
+    grab_download,
     grab_screenshot,
     rename_artifact,
     scaffold_unlinked_sources,
     scan_artifacts,
+    suggest_recent_artifacts,
 )
 from genealogy.schema import read_markdown_frontmatter
 from genealogy.validator import validate_dataset
@@ -207,3 +209,226 @@ def test_cli_grab_screenshot_and_rename_artifact(tmp_path: Path, capsys) -> None
     out2 = json.loads(capsys.readouterr().out)
     assert out2["new_rel_path"] == "artifacts/1930_census_west.png"
     assert (repo / "artifacts" / "1930_census_west.png").is_file()
+
+
+def test_grab_download_finds_latest_and_handles_duplicates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "artifacts").mkdir(parents=True)
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+
+    older = downloads / "birth_certificate.jpg"
+    newer_pdf = downloads / "1930_census_west.pdf"
+    in_progress = downloads / "1940_census.pdf.crdownload"
+    older.write_bytes(b"older-jpg-bytes")
+    newer_pdf.write_bytes(b"%PDF-1.4 census")
+    in_progress.write_bytes(b"partial-download")
+
+    os.utime(older, (1000.0, 1000.0))
+    os.utime(newer_pdf, (2000.0, 2000.0))
+    os.utime(in_progress, (3000.0, 3000.0))
+
+    monkeypatch.setenv("GENEALOGY_DOWNLOADS_DIR", str(downloads))
+
+    # Dry run does not copy and ignores .crdownload
+    dry = grab_download(repo, dry_run=True)
+    assert dry.source_path == newer_pdf.resolve()
+    assert dry.rel_path == "artifacts/1930_census_west.pdf"
+    assert not (repo / "artifacts" / "1930_census_west.pdf").exists()
+
+    # Real grab copies newest valid download
+    res = grab_download(repo)
+    assert res.already_exists is False
+    assert (repo / "artifacts" / "1930_census_west.pdf").read_bytes() == b"%PDF-1.4 census"
+
+    # Re-grabbing identical bytes reports already_exists
+    dup = grab_download(repo)
+    assert dup.already_exists is True
+    assert dup.existing_rel_path == "artifacts/1930_census_west.pdf"
+
+    # Explicit --from and --name without extension preserves .jpg
+    res_named = grab_download(repo, source=older, name="1905_birth_west")
+    assert res_named.rel_path == "artifacts/1905_birth_west.jpg"
+    assert (repo / "artifacts" / "1905_birth_west.jpg").read_bytes() == b"older-jpg-bytes"
+
+    # Path traversal is rejected
+    with pytest.raises(ValueError):
+        grab_download(repo, source=older, name="../escape.jpg")
+
+
+def test_intake_prompts_and_suggests_recent_screenshots_and_downloads(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "artifacts").mkdir(parents=True)
+    shots = tmp_path / "Screenshots"
+    downloads = tmp_path / "Downloads"
+    shots.mkdir()
+    downloads.mkdir()
+
+    shot1 = shots / "Screenshot 2026-11-20.png"
+    dl_census = downloads / "1920_census_record.pdf"
+    dl_other = downloads / "receipt.pdf"
+    shot1.write_bytes(b"shot1-bytes")
+    dl_census.write_bytes(b"census-pdf-bytes")
+    dl_other.write_bytes(b"receipt-pdf-bytes")
+
+    os.utime(shot1, (1500.0, 1500.0))
+    os.utime(dl_census, (2000.0, 2000.0))
+    os.utime(dl_other, (2500.0, 2500.0))
+
+    monkeypatch.setenv("GENEALOGY_SCREENSHOTS_DIR", str(shots))
+    monkeypatch.setenv("GENEALOGY_DOWNLOADS_DIR", str(downloads))
+
+    # API suggestion returns newest first across both folders with genealogy hint
+    cands = suggest_recent_artifacts(repo, limit=5)
+    assert [c.path.name for c in cands] == [
+        "receipt.pdf",
+        "1920_census_record.pdf",
+        "Screenshot 2026-11-20.png",
+    ]
+    assert cands[1].genealogy_hint is True
+    assert cands[1].suggested_command == f'genealogy grab-download --from "{dl_census.resolve()}"'
+    assert cands[2].suggested_command == "genealogy grab-screenshot"
+
+    # CLI intake with no artifacts prompts grab-screenshot / grab-download and lists recent files
+    rc = main(["intake", "--root", str(repo)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No artifacts found in artifacts/." in out
+    assert "genealogy grab-screenshot" in out
+    assert "genealogy grab-download" in out
+    assert "1920_census_record.pdf" in out
+    assert "Screenshot 2026-11-20.png" in out
+    assert "Suggested copy:" in out
+
+    # CLI intake --json also includes suggestions when no unlinked artifacts exist
+    rc_json = main(["intake", "--root", str(repo), "--json"])
+    assert rc_json == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total_artifacts"] == 0
+    assert len(payload["suggestions"]) == 3
+
+    # CLI grab-download --list and grab-download --json
+    rc_list = main(["grab-download", "--root", str(repo), "--list", "--json"])
+    assert rc_list == 0
+    dl_list = json.loads(capsys.readouterr().out)
+    assert [item["name"] for item in dl_list] == ["receipt.pdf", "1920_census_record.pdf"]
+
+    rc_grab = main(["grab-download", "--root", str(repo), "--from", str(dl_census), "--json"])
+    assert rc_grab == 0
+    grab_out = json.loads(capsys.readouterr().out)
+    assert grab_out["rel_path"] == "artifacts/1920_census_record.pdf"
+    assert (repo / "artifacts" / "1920_census_record.pdf").is_file()
+
+
+def test_pick_by_number_on_intake_and_grab_commands(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "artifacts").mkdir(parents=True)
+    shots = tmp_path / "Screenshots"
+    downloads = tmp_path / "Downloads"
+    shots.mkdir()
+    downloads.mkdir()
+
+    shot1 = shots / "Screenshot_1.png"
+    dl_census = downloads / "1920_census.pdf"
+    dl_other = downloads / "notes.txt"
+    shot1.write_bytes(b"shot1-bytes")
+    dl_census.write_bytes(b"census-bytes")
+    dl_other.write_bytes(b"other-bytes")
+
+    os.utime(shot1, (1000.0, 1000.0))
+    os.utime(dl_census, (2000.0, 2000.0))
+    os.utime(dl_other, (3000.0, 3000.0))
+
+    monkeypatch.setenv("GENEALOGY_SCREENSHOTS_DIR", str(shots))
+    monkeypatch.setenv("GENEALOGY_DOWNLOADS_DIR", str(downloads))
+
+    # 1 = notes.txt, 2 = 1920_census.pdf, 3 = Screenshot_1.png
+    # Pick 2 and 3 directly from `genealogy intake --pick 2,3`
+    rc_pick = main(["intake", "--root", str(repo), "--pick", "2,3", "--json"])
+    assert rc_pick == 0
+    picked = json.loads(capsys.readouterr().out)
+    assert [p["rel_path"] for p in picked] == [
+        "artifacts/1920_census.pdf",
+        "artifacts/Screenshot_1.png",
+    ]
+    assert (repo / "artifacts" / "1920_census.pdf").is_file()
+    assert (repo / "artifacts" / "Screenshot_1.png").is_file()
+
+    # Positional pick on grab-download: `genealogy grab-download 1` copies notes.txt
+    rc_dl = main(["grab-download", "1", "--root", str(repo), "--json"])
+    assert rc_dl == 0
+    dl_out = json.loads(capsys.readouterr().out)
+    assert dl_out["rel_path"] == "artifacts/notes.txt"
+
+    # Interactive `genealogy intake --pick` (when artifacts/ is empty)
+    repo2 = tmp_path / "repo2"
+    (repo2 / "artifacts").mkdir(parents=True)
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    rc_inter = main(["intake", "--root", str(repo2), "--pick"])
+    assert rc_inter == 0
+    capsys.readouterr()
+    assert (repo2 / "artifacts" / "1920_census.pdf").is_file()
+
+    # Out-of-range pick returns non-zero cleanly
+    rc_bad = main(["grab-download", "99", "--root", str(repo2)])
+    assert rc_bad == 1
+    assert "out of range" in capsys.readouterr().err
+
+
+def test_intake_surfaces_downloads_newer_than_existing_artifacts(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    art_dir = repo / "artifacts"
+    art_dir.mkdir(parents=True)
+    shots = tmp_path / "Screenshots"
+    downloads = tmp_path / "Downloads"
+    shots.mkdir()
+    downloads.mkdir()
+
+    existing_art = art_dir / "earlier_session_scan.png"
+    existing_art.write_bytes(b"existing-artifact")
+    os.utime(existing_art, (1000.0, 1000.0))
+
+    old_dl = downloads / "old_unrelated.pdf"
+    new_dl1 = downloads / "1910_census_p1.pdf"
+    new_dl2 = downloads / "1910_census_p2.pdf"
+    old_dl.write_bytes(b"old-dl")
+    new_dl1.write_bytes(b"new-dl-1")
+    new_dl2.write_bytes(b"new-dl-2")
+    os.utime(old_dl, (500.0, 500.0))
+    os.utime(new_dl1, (2000.0, 2000.0))
+    os.utime(new_dl2, (3000.0, 3000.0))
+
+    monkeypatch.setenv("GENEALOGY_SCREENSHOTS_DIR", str(shots))
+    monkeypatch.setenv("GENEALOGY_DOWNLOADS_DIR", str(downloads))
+
+    rc = main(["intake", "--root", str(repo)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Newer files found in Screenshots/Downloads" in out
+    assert "1910_census_p2.pdf" in out
+    assert "1910_census_p1.pdf" in out
+    assert "old_unrelated.pdf" not in out
+
+    rc_json = main(["intake", "--root", str(repo), "--json"])
+    assert rc_json == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [c["name"] for c in payload["newer_candidates"]] == [
+        "1910_census_p2.pdf",
+        "1910_census_p1.pdf",
+    ]
+    assert all(c["newer_than_latest_artifact"] for c in payload["newer_candidates"])
+
+    # Pick 1,2 copies both newer downloads
+    rc_pick = main(["intake", "--root", str(repo), "--pick", "1,2"])
+    assert rc_pick == 0
+    capsys.readouterr()
+    assert (art_dir / "1910_census_p1.pdf").is_file()
+    assert (art_dir / "1910_census_p2.pdf").is_file()
