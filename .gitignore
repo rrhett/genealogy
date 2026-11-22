@@ -16,6 +16,7 @@ build/
 
 # Staging & temporary scratch exports
 workspace/staging/
+TOOLKIT_FEEDBACK.md
 
 # OS & editor files
 .DS_Store
