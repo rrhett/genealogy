@@ -7,16 +7,18 @@ from pathlib import Path
 import pytest
 
 from genealogy.analysis import (
+    KinshipContext,
     build_family_report_markdown,
     compute_dna_corroboration,
     compute_kinship,
     compute_land_tracts,
     compute_pedigree_collapse,
+    compute_place_profile,
     compute_research_gaps,
     find_consanguineous_marriages,
     label_kinship_steps,
 )
-from genealogy.loader import Dataset, LoadedIndividual
+from genealogy.loader import Dataset, LoadedIndividual, load_dataset
 from genealogy.schema import IndividualFrontmatter, Relationship
 
 EXAMPLE_ROOT = Path(__file__).resolve().parents[1] / "examples" / "west-family"
@@ -332,3 +334,30 @@ def test_marriage_investigation_gaps(tmp_path: Path) -> None:
     assert mgaps[1]["person_1"] == "I-SOLO-PEDRO-1810"
     assert mgaps[1]["person_2"] is None
     assert mgaps[1]["investigation_date"] == "1832-04-01"
+
+
+def test_kinship_context_matches_standalone_and_returns_isolated_copies() -> None:
+    """Shared KinshipContext produces identical kinship, collapse, consanguinity, and place outputs."""
+    ds = load_dataset(EXAMPLE_ROOT)
+    ctx = KinshipContext(ds)
+
+    assert [r.to_dict() for r in find_consanguineous_marriages(ds)] == [
+        r.to_dict() for r in find_consanguineous_marriages(ds, _ctx=ctx)
+    ]
+
+    for iid in sorted(ds.individuals):
+        assert compute_pedigree_collapse(ds, iid).to_dict() == compute_pedigree_collapse(
+            ds, iid, _ctx=ctx
+        ).to_dict()
+
+    assert compute_kinship(ds, "I-WEST-CLAUDE-1886", "I-RAINWATER-OCTA-1890").to_dict() == compute_kinship(
+        ds, "I-WEST-CLAUDE-1886", "I-RAINWATER-OCTA-1890", _ctx=ctx
+    ).to_dict()
+
+    for pid in sorted(ds.places):
+        assert compute_place_profile(ds, pid) == compute_place_profile(ds, pid, _ctx=ctx)
+
+    c1 = ctx.classify_kinship_to_root("I-WEST-JANE-1950", "I-WEST-THOMAS-1830")
+    c1["category"] = "mutated"
+    c2 = ctx.classify_kinship_to_root("I-WEST-JANE-1950", "I-WEST-THOMAS-1830")
+    assert c2["category"] == "direct_ancestor"

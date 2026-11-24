@@ -320,6 +320,318 @@ def _build_coancestry_calculator(ds: Dataset) -> tuple[Any, Any]:
     return coancestry, inbreeding
 
 
+class KinshipContext:
+    """Reusable graph indices and caches for kinship, collapse, and place-profile queries on a Dataset."""
+
+    def __init__(self, ds: Dataset) -> None:
+        self.ds = ds
+        self.parents_map = _bio_parents_map(ds)
+        self.children_map: dict[str, list[str]] = defaultdict(list)
+        for child, ps in self.parents_map.items():
+            for p in ps:
+                self.children_map[p].append(child)
+        self.depths = _generation_depths(ds, self.parents_map)
+
+        self.marriages: set[tuple[str, str]] = set()
+        self.fan_pairs: set[tuple[str, str]] = set()
+        for rel in ds.relationships:
+            if rel.type == "marriage":
+                pair = (rel.person_1, rel.person_2) if rel.person_1 <= rel.person_2 else (rel.person_2, rel.person_1)
+                self.marriages.add(pair)
+            elif rel.type == "fan_associate":
+                pair = (rel.person_1, rel.person_2) if rel.person_1 <= rel.person_2 else (rel.person_2, rel.person_1)
+                self.fan_pairs.add(pair)
+
+        parents_map = self.parents_map
+        depths = self.depths
+
+        @cache
+        def coancestry(a: str, b: str) -> float:
+            if a > b:
+                a, b = b, a
+            if a == b:
+                return 0.5 * (1.0 + inbreeding(a))
+            # Expand the deeper node (guaranteed not to be an ancestor of the shallower one in a DAG)
+            if depths.get(a, 0) < depths.get(b, 0):
+                a, b = b, a
+            pa = parents_map.get(a, [])
+            if not pa:
+                return 0.0
+            return 0.5 * sum(coancestry(p, b) for p in pa[:2])
+
+        @cache
+        def inbreeding(x: str) -> float:
+            px = parents_map.get(x, [])
+            if len(px) < 2:
+                return 0.0
+            return coancestry(px[0], px[1])
+
+        self.coancestry = coancestry
+        self.inbreeding = inbreeding
+        self._anc_dist_cache: dict[tuple[str, int], dict[str, int]] = {}
+        self._classify_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def ancestor_distances(self, start: str, max_depth: int) -> dict[str, int]:
+        """Return cached {ancestor_id: min_upward_steps} within max_depth steps of `start`."""
+        key = (start, max_depth)
+        cached = self._anc_dist_cache.get(key)
+        if cached is not None:
+            return cached
+        dists: dict[str, int] = {start: 0}
+        if max_depth > 0:
+            queue: deque[tuple[str, int]] = deque([(start, 0)])
+            pm = self.parents_map
+            while queue:
+                u, d = queue.popleft()
+                nd = d + 1
+                for p in pm.get(u, ()):
+                    if p not in dists:
+                        dists[p] = nd
+                        if nd < max_depth:
+                            queue.append((p, nd))
+        self._anc_dist_cache[key] = dists
+        return dists
+
+    def _pruned_upward_paths(
+        self,
+        start: str,
+        dist_from_start: dict[str, int],
+        targets: set[str],
+        max_depth: int,
+        target_bits: dict[str, int] | None = None,
+    ) -> dict[str, list[tuple[list[str], int]]]:
+        """Enumerate simple upward paths from `start` that can reach `targets` within `max_depth`."""
+        dist_to_target: dict[str, int] = {t: 0 for t in targets}
+        dq: deque[str] = deque(targets)
+        cm = self.children_map
+        while dq:
+            u = dq.popleft()
+            nd = dist_to_target[u] + 1
+            for c in cm.get(u, ()):
+                if c in dist_from_start and c not in dist_to_target and dist_from_start[c] + nd <= max_depth:
+                    dist_to_target[c] = nd
+                    dq.append(c)
+
+        if start not in dist_to_target:
+            return {}
+
+        pm = self.parents_map
+        out: dict[str, list[tuple[list[str], int]]] = defaultdict(list)
+        pq: deque[tuple[list[str], int]] = deque([([start], 0)])
+        while pq:
+            path, mask = pq.popleft()
+            curr = path[-1]
+            if curr in targets:
+                out[curr].append((path, mask))
+            plen = len(path) - 1
+            if plen >= max_depth:
+                continue
+            next_mask = (mask | target_bits.get(curr, 0)) if target_bits is not None else 0
+            for p in pm.get(curr, ()):
+                dt = dist_to_target.get(p)
+                if dt is not None and (plen + 1 + dt <= max_depth) and p not in path:
+                    pq.append((path + [p], next_mask))
+        return out
+
+    def compute_kinship(
+        self,
+        person_a: str,
+        person_b: str,
+        *,
+        max_depth: int = 10,
+    ) -> KinshipReport:
+        """Compute all distinct blood kinship paths, coancestry, and Wright's r using cached indices."""
+        ds = self.ds
+        if person_a not in ds.individuals:
+            raise KeyError(f"Individual '{person_a}' not found")
+        if person_b not in ds.individuals:
+            raise KeyError(f"Individual '{person_b}' not found")
+
+        pair = (person_a, person_b) if person_a <= person_b else (person_b, person_a)
+        are_married = pair in self.marriages
+
+        da = self.ancestor_distances(person_a, max_depth)
+        db = self.ancestor_distances(person_b, max_depth)
+        common = set(da.keys()) & set(db.keys())
+
+        found: list[KinshipPath] = []
+        if common:
+            # Any interior node shared by pa[:-1] and pb[:-1] must belong to both da and db (i.e. `common`).
+            common_bit = {node: 1 << idx for idx, node in enumerate(common)}
+            paths_a = self._pruned_upward_paths(person_a, da, common, max_depth, common_bit)
+            paths_b = self._pruned_upward_paths(person_b, db, common, max_depth, common_bit)
+            inb = self.inbreeding
+            for anc in sorted(common):
+                pa_list = paths_a.get(anc)
+                pb_list = paths_b.get(anc)
+                if not pa_list or not pb_list:
+                    continue
+                anc_name = ds.individuals[anc].data.primary_name
+                anc_factor = 1.0 + inb(anc)
+                for pa, ma in pa_list:
+                    m = len(pa) - 1
+                    for pb, mb in pb_list:
+                        if ma & mb:
+                            continue
+                        n = len(pb) - 1
+                        found.append(
+                            KinshipPath(
+                                common_ancestor=anc,
+                                common_ancestor_name=anc_name,
+                                steps_a=m,
+                                steps_b=n,
+                                label=label_kinship_steps(m, n),
+                                path_a=pa,
+                                path_b=pb,
+                                path_contribution=(0.5 ** (m + n)) * anc_factor,
+                            )
+                        )
+            found.sort(key=lambda p: (p.steps_a + p.steps_b, p.steps_a, p.common_ancestor))
+
+        phi = self.coancestry(person_a, person_b)
+        fa = self.inbreeding(person_a)
+        fb = self.inbreeding(person_b)
+        wright_r = (2.0 * phi) / math.sqrt((1.0 + fa) * (1.0 + fb)) if person_a != person_b else 1.0
+
+        return KinshipReport(
+            person_a=person_a,
+            person_a_name=ds.individuals[person_a].data.primary_name,
+            person_b=person_b,
+            person_b_name=ds.individuals[person_b].data.primary_name,
+            are_married=are_married,
+            coancestry=phi,
+            wright_relationship=wright_r,
+            expected_offspring_inbreeding=phi,
+            paths=found,
+        )
+
+    def compute_pedigree_collapse(
+        self,
+        individual_id: str,
+        *,
+        max_gen: int = 8,
+    ) -> CollapseReport:
+        """Compute per-generation pedigree collapse, multi-path ancestors, and Wright's F."""
+        ds = self.ds
+        if individual_id not in ds.individuals:
+            raise KeyError(f"Individual '{individual_id}' not found")
+
+        pm = self.parents_map
+        gen_filled: dict[int, int] = defaultdict(int)
+        gen_unique: dict[int, set[str]] = defaultdict(set)
+        anc_counts: dict[str, int] = defaultdict(int)
+        in_stack: set[str] = {individual_id}
+
+        def _dfs(curr: str, depth: int) -> None:
+            if depth >= max_gen:
+                return
+            nd = depth + 1
+            for p in pm.get(curr, ()):
+                if p not in in_stack:
+                    gen_filled[nd] += 1
+                    gen_unique[nd].add(p)
+                    anc_counts[p] += 1
+                    if nd < max_gen:
+                        in_stack.add(p)
+                        _dfs(p, nd)
+                        in_stack.remove(p)
+
+        _dfs(individual_id, 0)
+
+        generations: list[GenerationCollapse] = []
+        for g in sorted(gen_filled.keys()):
+            filled = gen_filled[g]
+            uniq = len(gen_unique[g])
+            generations.append(
+                GenerationCollapse(
+                    generation=g,
+                    theoretical_slots=2**g,
+                    filled_slots=filled,
+                    unique_ancestors=uniq,
+                    collapse_ratio=(1.0 - (uniq / filled)) if filled > 0 else 0.0,
+                )
+            )
+
+        multi_targets = {anc for anc, cnt in anc_counts.items() if cnt >= 2}
+        multi_path: list[MultiPathAncestor] = []
+        if multi_targets:
+            da = self.ancestor_distances(individual_id, max_gen)
+            paths_by_anc = self._pruned_upward_paths(individual_id, da, multi_targets, max_gen)
+            for anc in sorted(multi_targets):
+                raw_paths = paths_by_anc.get(anc)
+                if not raw_paths or len(raw_paths) < 2:
+                    continue
+                paths = [p for p, _ in raw_paths]
+                gens = sorted({len(p) - 1 for p in paths})
+                multi_path.append(
+                    MultiPathAncestor(
+                        individual_id=anc,
+                        primary_name=ds.individuals[anc].data.primary_name,
+                        path_count=len(paths),
+                        generations=gens,
+                        paths=paths,
+                    )
+                )
+            multi_path.sort(key=lambda a: (-a.path_count, min(a.generations), a.individual_id))
+
+        return CollapseReport(
+            individual_id=individual_id,
+            primary_name=ds.individuals[individual_id].data.primary_name,
+            inbreeding_coefficient=self.inbreeding(individual_id),
+            generations=generations,
+            multi_path_ancestors=multi_path,
+        )
+
+    def classify_kinship_to_root(self, root_id: str, target_id: str) -> dict[str, Any]:
+        """Cached classification of `target_id`'s relationship to `root_id`."""
+        key = (root_id, target_id)
+        cached = self._classify_cache.get(key)
+        if cached is not None:
+            return dict(cached)
+
+        if target_id == root_id:
+            res: dict[str, Any] = {
+                "category": "self",
+                "label": "focal person (self)",
+                "wright_relationship": 1.0,
+                "path_count": 0,
+            }
+        else:
+            kin = self.compute_kinship(root_id, target_id)
+            if kin.paths:
+                best = min(kin.paths, key=lambda p: (p.steps_a + p.steps_b, p.steps_a))
+                if best.steps_b == 0 and best.steps_a > 0:
+                    category = "direct_ancestor"
+                elif best.steps_a == 0 and best.steps_b > 0:
+                    category = "direct_descendant"
+                else:
+                    category = "collateral"
+                res = {
+                    "category": category,
+                    "label": best.label,
+                    "wright_relationship": round(kin.wright_relationship, 6),
+                    "path_count": len(kin.paths),
+                }
+            elif kin.are_married:
+                res = {
+                    "category": "spouse",
+                    "label": "spouse",
+                    "wright_relationship": 0.0,
+                    "path_count": 0,
+                }
+            else:
+                pair = (root_id, target_id) if root_id <= target_id else (target_id, root_id)
+                is_fan = pair in self.fan_pairs
+                res = {
+                    "category": "fan_or_unrelated",
+                    "label": "FAN associate" if is_fan else "unrelated / neighbor",
+                    "wright_relationship": 0.0,
+                    "path_count": 0,
+                }
+        self._classify_cache[key] = res
+        return dict(res)
+
+
 def _all_upward_paths(
     start: str, parents_map: dict[str, list[str]], max_depth: int = 12
 ) -> dict[str, list[list[str]]]:
@@ -395,72 +707,12 @@ def compute_kinship(
     person_b: str,
     *,
     max_depth: int = 10,
+    _ctx: KinshipContext | None = None,
 ) -> KinshipReport:
     """Compute all distinct blood kinship paths, coancestry, and Wright's r between two individuals."""
     ds = root if isinstance(root, Dataset) else load_dataset(root)
-    if person_a not in ds.individuals:
-        raise KeyError(f"Individual '{person_a}' not found")
-    if person_b not in ds.individuals:
-        raise KeyError(f"Individual '{person_b}' not found")
-
-    parents_map = _bio_parents_map(ds)
-    coancestry_fn, inbreeding_fn = _build_coancestry_calculator(ds)
-
-    are_married = any(
-        r.type == "marriage" and {r.person_1, r.person_2} == {person_a, person_b}
-        for r in ds.relationships
-    )
-
-    paths_a = _all_upward_paths(person_a, parents_map, max_depth=max_depth)
-    paths_b = _all_upward_paths(person_b, parents_map, max_depth=max_depth)
-
-    common = set(paths_a.keys()) & set(paths_b.keys())
-    found: list[KinshipPath] = []
-
-    for anc in sorted(common):
-        for pa in paths_a[anc]:
-            interior_a = set(pa[:-1])
-            for pb in paths_b[anc]:
-                interior_b = set(pb[:-1])
-                # Only keep vertex-disjoint paths meeting solely at `anc`
-                if interior_a & interior_b:
-                    continue
-                if anc in interior_a or anc in interior_b:
-                    continue
-                m = len(pa) - 1
-                n = len(pb) - 1
-                contrib = (0.5 ** (m + n)) * (1.0 + inbreeding_fn(anc))
-                found.append(
-                    KinshipPath(
-                        common_ancestor=anc,
-                        common_ancestor_name=ds.individuals[anc].data.primary_name,
-                        steps_a=m,
-                        steps_b=n,
-                        label=label_kinship_steps(m, n),
-                        path_a=pa,
-                        path_b=pb,
-                        path_contribution=contrib,
-                    )
-                )
-
-    found.sort(key=lambda p: (p.steps_a + p.steps_b, p.steps_a, p.common_ancestor))
-
-    phi = coancestry_fn(person_a, person_b)
-    fa = inbreeding_fn(person_a)
-    fb = inbreeding_fn(person_b)
-    wright_r = (2.0 * phi) / math.sqrt((1.0 + fa) * (1.0 + fb)) if person_a != person_b else 1.0
-
-    return KinshipReport(
-        person_a=person_a,
-        person_a_name=ds.individuals[person_a].data.primary_name,
-        person_b=person_b,
-        person_b_name=ds.individuals[person_b].data.primary_name,
-        are_married=are_married,
-        coancestry=phi,
-        wright_relationship=wright_r,
-        expected_offspring_inbreeding=phi,
-        paths=found,
-    )
+    ctx = _ctx if _ctx is not None else KinshipContext(ds)
+    return ctx.compute_kinship(person_a, person_b, max_depth=max_depth)
 
 
 @dataclass
@@ -522,76 +774,28 @@ def compute_pedigree_collapse(
     individual_id: str,
     *,
     max_gen: int = 8,
+    _ctx: KinshipContext | None = None,
 ) -> CollapseReport:
     """Compute per-generation pedigree collapse, multi-path ancestors, and Wright's F."""
     ds = root if isinstance(root, Dataset) else load_dataset(root)
-    if individual_id not in ds.individuals:
-        raise KeyError(f"Individual '{individual_id}' not found")
-
-    parents_map = _bio_parents_map(ds)
-    _, inbreeding_fn = _build_coancestry_calculator(ds)
-    paths_by_anc = _all_upward_paths(individual_id, parents_map, max_depth=max_gen)
-
-    # Per-generation slot counts
-    gen_slots: dict[int, list[str]] = defaultdict(list)
-    for anc, paths in paths_by_anc.items():
-        if anc == individual_id:
-            continue
-        for p in paths:
-            g = len(p) - 1
-            if 1 <= g <= max_gen:
-                gen_slots[g].append(anc)
-
-    generations: list[GenerationCollapse] = []
-    for g in sorted(gen_slots.keys()):
-        slots = gen_slots[g]
-        uniq = len(set(slots))
-        filled = len(slots)
-        collapse_ratio = (1.0 - (uniq / filled)) if filled > 0 else 0.0
-        generations.append(
-            GenerationCollapse(
-                generation=g,
-                theoretical_slots=2**g,
-                filled_slots=filled,
-                unique_ancestors=uniq,
-                collapse_ratio=collapse_ratio,
-            )
-        )
-
-    multi_path: list[MultiPathAncestor] = []
-    for anc, paths in sorted(paths_by_anc.items()):
-        if anc == individual_id or len(paths) < 2:
-            continue
-        gens = sorted({len(p) - 1 for p in paths})
-        multi_path.append(
-            MultiPathAncestor(
-                individual_id=anc,
-                primary_name=ds.individuals[anc].data.primary_name,
-                path_count=len(paths),
-                generations=gens,
-                paths=paths,
-            )
-        )
-    multi_path.sort(key=lambda a: (-a.path_count, min(a.generations), a.individual_id))
-
-    return CollapseReport(
-        individual_id=individual_id,
-        primary_name=ds.individuals[individual_id].data.primary_name,
-        inbreeding_coefficient=inbreeding_fn(individual_id),
-        generations=generations,
-        multi_path_ancestors=multi_path,
-    )
+    ctx = _ctx if _ctx is not None else KinshipContext(ds)
+    return ctx.compute_pedigree_collapse(individual_id, max_gen=max_gen)
 
 
-def find_consanguineous_marriages(ds: Dataset) -> list[KinshipReport]:
+def find_consanguineous_marriages(
+    ds: Dataset,
+    *,
+    _ctx: KinshipContext | None = None,
+) -> list[KinshipReport]:
     """Find all marriage edges where spouses share at least one blood ancestor."""
+    ctx = _ctx if _ctx is not None else KinshipContext(ds)
     results: list[KinshipReport] = []
     for rel in ds.relationships:
         if rel.type != "marriage":
             continue
         if rel.person_1 not in ds.individuals or rel.person_2 not in ds.individuals:
             continue
-        rep = compute_kinship(ds, rel.person_1, rel.person_2)
+        rep = ctx.compute_kinship(rel.person_1, rel.person_2)
         if rep.paths:
             results.append(rep)
     return results
@@ -1272,50 +1476,12 @@ def _classify_kinship_to_root(
     ds: Dataset,
     root_id: str,
     target_id: str,
+    *,
+    _ctx: KinshipContext | None = None,
 ) -> dict[str, Any]:
     """Classify `target_id`'s relationship to `root_id` for place/community lenses."""
-    if target_id == root_id:
-        return {
-            "category": "self",
-            "label": "focal person (self)",
-            "wright_relationship": 1.0,
-            "path_count": 0,
-        }
-
-    kin = compute_kinship(ds, root_id, target_id)
-    if kin.paths:
-        best = min(kin.paths, key=lambda p: (p.steps_a + p.steps_b, p.steps_a))
-        if best.steps_b == 0 and best.steps_a > 0:
-            category = "direct_ancestor"
-        elif best.steps_a == 0 and best.steps_b > 0:
-            category = "direct_descendant"
-        else:
-            category = "collateral"
-        return {
-            "category": category,
-            "label": best.label,
-            "wright_relationship": round(kin.wright_relationship, 6),
-            "path_count": len(kin.paths),
-        }
-
-    if kin.are_married:
-        return {
-            "category": "spouse",
-            "label": "spouse",
-            "wright_relationship": 0.0,
-            "path_count": 0,
-        }
-
-    is_fan = any(
-        r.type == "fan_associate" and {r.person_1, r.person_2} == {root_id, target_id}
-        for r in ds.relationships
-    )
-    return {
-        "category": "fan_or_unrelated",
-        "label": "FAN associate" if is_fan else "unrelated / neighbor",
-        "wright_relationship": 0.0,
-        "path_count": 0,
-    }
+    ctx = _ctx if _ctx is not None else KinshipContext(ds)
+    return ctx.classify_kinship_to_root(root_id, target_id)
 
 
 def list_places_summary(root: Path | str | Dataset) -> dict[str, Any]:
@@ -1323,7 +1489,7 @@ def list_places_summary(root: Path | str | Dataset) -> dict[str, Any]:
     ds = root if isinstance(root, Dataset) else load_dataset(root)
     summaries: list[dict[str, Any]] = []
     for pid in sorted(ds.places):
-        profile = compute_place_profile(ds, pid)
+        profile = compute_place_profile(ds, pid, include_kinship=False)
         summaries.append(
             {
                 "id": profile["id"],
@@ -1346,6 +1512,8 @@ def compute_place_profile(
     place_id: str,
     *,
     root_id: str | None = None,
+    _ctx: KinshipContext | None = None,
+    include_kinship: bool = True,
 ) -> dict[str, Any]:
     """Aggregate individuals, couples, events, and sources tied to a `data/places/<ID>.md` record."""
     ds = root if isinstance(root, Dataset) else load_dataset(root)
@@ -1480,6 +1648,8 @@ def compute_place_profile(
         if src.data.place_id == place_id or _place_matches(src.data.jurisdiction, terms):
             cited_sids.add(sid)
 
+    ctx = _ctx if (_ctx is not None or not (effective_root and include_kinship)) else KinshipContext(ds)
+
     individuals_out: list[dict[str, Any]] = []
     for iid in sorted(matched_ids):
         if iid not in ds.individuals:
@@ -1495,8 +1665,8 @@ def compute_place_profile(
             "status": ind.status,
             "roles": roles_unique,
         }
-        if effective_root:
-            entry["kinship"] = _classify_kinship_to_root(ds, effective_root, iid)
+        if effective_root and include_kinship and ctx is not None:
+            entry["kinship"] = ctx.classify_kinship_to_root(effective_root, iid)
         individuals_out.append(entry)
 
     def _ev_sort_key(ev: dict[str, Any]) -> tuple[int, int, int, str]:

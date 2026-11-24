@@ -11,6 +11,7 @@ import yaml
 from pydantic import ValidationError
 
 from genealogy.schema import (
+    _YAML_SAFE_LOADER,
     IndividualFrontmatter,
     PlaceFrontmatter,
     Relationship,
@@ -103,7 +104,7 @@ def load_workspace_config(root: Path) -> dict[str, Any]:
     if not cfg_path.exists():
         return {}
     try:
-        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        data = yaml.load(cfg_path.read_text(encoding="utf-8"), Loader=_YAML_SAFE_LOADER)
         return data if isinstance(data, dict) else {}
     except yaml.YAMLError:
         return {}
@@ -188,7 +189,7 @@ def load_dataset(root: Path | str) -> Dataset:
         text = rel_path.read_text(encoding="utf-8").strip()
         if text:
             try:
-                raw_rel = yaml.safe_load(text)
+                raw_rel = yaml.load(text, Loader=_YAML_SAFE_LOADER)
                 if raw_rel is None:
                     raw_rel = {"relationships": []}
                 parsed = RelationshipsFile.model_validate(raw_rel)

@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 
 from genealogy.viewer import (
+    _build_living_redactor,
+    _compute_dag_layout,
+    _fast_pair_cost_int,
+    _pair_cross_diff,
     build_viewer_payload,
     export_viewer_html,
     make_viewer_server,
@@ -370,6 +374,215 @@ def test_viewer_http_server_endpoints_and_traversal_guard() -> None:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(f"{base}/artifacts/%2e%2e/%2e%2e/README.md")
         assert exc_info.value.code in {403, 404}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fast_crossing_helpers_match_bruteforce() -> None:
+    """Verify Fenwick cost and two-pointer swap delta match brute-force crossing+span math."""
+    import random
+
+    def _brute_pair_cost(edges_uv: list[tuple[float, float]]) -> float:
+        m = len(edges_uv)
+        if m <= 1:
+            return sum((u - v) ** 2 for u, v in edges_uv) * 0.05
+        crossings = 0
+        span = 0.0
+        for i in range(m):
+            u1, v1 = edges_uv[i]
+            span += (u1 - v1) ** 2
+            for j in range(i + 1, m):
+                u2, v2 = edges_uv[j]
+                if (u1 - u2) * (v1 - v2) < 0:
+                    crossings += 1
+        return crossings * 100.0 + span * 0.05
+
+    rng = random.Random(1234)
+    for _ in range(40):
+        groups2 = [
+            sorted(rng.choice([0, 2, 4, 5, 7, 10, 13]) for _ in range(rng.randint(0, 4)))
+            for _ in range(12)
+        ]
+        lxs2 = [i * 3 for i in range(12)]
+        edges_up = [(u2 * 0.5, lx2 * 0.5) for us2, lx2 in zip(groups2, lxs2, strict=True) for u2 in us2]
+        assert _fast_pair_cost_int(groups2, lxs2) == pytest.approx(_brute_pair_cost(edges_up), abs=1e-9)
+
+        # Verify _pair_cross_diff matches exact crossing change when swapping two adjacent nodes
+        i = rng.randrange(len(groups2) - 1)
+        before = _fast_pair_cost_int(groups2, lxs2)
+        g_swapped = list(groups2)
+        g_swapped[i], g_swapped[i + 1] = g_swapped[i + 1], g_swapped[i]
+        after = _fast_pair_cost_int(g_swapped, lxs2)
+        # Subtract exact span difference so only crossing delta remains
+        span_before = sum((u2 - lxs2[k]) ** 2 for k in (i, i + 1) for u2 in groups2[k]) * 0.0125
+        span_after = sum((u2 - lxs2[k]) ** 2 for k in (i, i + 1) for u2 in g_swapped[k]) * 0.0125
+        exact_dcross = round(((after - before) - (span_after - span_before)) / 100.0)
+        assert _pair_cross_diff(groups2[i], groups2[i + 1]) == exact_dcross
+
+
+def test_living_redactor_trie_edge_cases(tmp_path: Path) -> None:
+    """Trie-compiled living redactor handles overlapping prefixes, punctuation, and accents."""
+    from genealogy.loader import Dataset, LoadedIndividual
+    from genealogy.schema import IndividualFrontmatter
+
+    ds = Dataset(
+        root=tmp_path,
+        individuals={
+            "I-WEST-JANE-1980": LoadedIndividual(
+                path=tmp_path / "jane.md",
+                data=IndividualFrontmatter(
+                    id="I-WEST-JANE-1980",
+                    primary_name="Jane West",
+                    name_variants=["Jane", "Jane West-Miller", "J. [Nick]+1"],
+                    living=True,
+                ),
+                body="",
+            ),
+            "I-GARCIA-ANA-1990": LoadedIndividual(
+                path=tmp_path / "ana.md",
+                data=IndividualFrontmatter(
+                    id="I-GARCIA-ANA-1990",
+                    primary_name="Ana María",
+                    name_variants=["Ana"],
+                    living=True,
+                ),
+                body="",
+            ),
+        },
+    )
+    scrub = _build_living_redactor(ds)
+    sample = "Met JANE WEST-MILLER, Jane West, jane, J. [Nick]+1, and ana maría / ANA yesterday."
+    redacted = scrub(sample)
+    assert redacted == "Met [Living], [Living], [Living], [Living], and [Living] / [Living] yesterday."
+
+
+def test_large_endogamous_dag_layout_invariants_and_speed(tmp_path: Path) -> None:
+    """240+ person endogamous DAG lays out cleanly with zero card overlaps and valid gen order."""
+    import random
+    import time
+
+    from genealogy.loader import Dataset, LoadedIndividual
+    from genealogy.schema import IndividualFrontmatter, Relationship, VitalEvent
+
+    rng = random.Random(42)
+    inds: dict[str, LoadedIndividual] = {}
+    rels: list[Relationship] = []
+    gen_couples: list[list[tuple[str, str]]] = []
+    idx = 0
+    for g in range(8):
+        year = 1720 + g * 25
+        row: list[tuple[str, str]] = []
+        for c in range(12):
+            idx += 1
+            m_id = f"I-FAM{c % 8}-M{idx}-{year}"
+            idx += 1
+            f_id = f"I-FAM{(c + 2) % 8}-F{idx}-{year + 2}"
+            for pid, sex, yr in ((m_id, "M", year), (f_id, "F", year + 2)):
+                inds[pid] = LoadedIndividual(
+                    path=tmp_path / f"{pid}.md",
+                    data=IndividualFrontmatter(
+                        id=pid,
+                        primary_name=f"Person {pid}",
+                        sex=sex,
+                        birth=VitalEvent(date=str(yr)),
+                    ),
+                    body="",
+                )
+            rels.append(Relationship(type="marriage", person_1=m_id, person_2=f_id, date=str(year + 22)))
+            row.append((m_id, f_id))
+        gen_couples.append(row)
+        if g > 0:
+            prev = gen_couples[g - 1]
+            for ci, (m_id, f_id) in enumerate(row):
+                pm, pf = prev[ci % len(prev)]
+                rels.append(Relationship(type="parent_child", person_1=pm, person_2=m_id))
+                rels.append(Relationship(type="parent_child", person_1=pf, person_2=m_id))
+                w_offset = rng.randint(1, 3) if rng.random() < 0.45 else rng.randint(4, len(prev) - 1)
+                wpm, wpf = prev[(ci + w_offset) % len(prev)]
+                rels.append(Relationship(type="parent_child", person_1=wpm, person_2=f_id))
+                rels.append(Relationship(type="parent_child", person_1=wpf, person_2=f_id))
+            for sc in range(6):
+                idx += 1
+                s_id = f"I-SIB-X{idx}-{year + 4}"
+                inds[s_id] = LoadedIndividual(
+                    path=tmp_path / f"{s_id}.md",
+                    data=IndividualFrontmatter(
+                        id=s_id, primary_name=f"Sibling {idx}", sex="M", birth=VitalEvent(date=str(year + 4))
+                    ),
+                    body="",
+                )
+                pm, pf = prev[sc % len(prev)]
+                rels.append(Relationship(type="parent_child", person_1=pm, person_2=s_id))
+                rels.append(Relationship(type="parent_child", person_1=pf, person_2=s_id))
+
+    ds = Dataset(
+        root=tmp_path,
+        individuals=inds,
+        sources={},
+        relationships=rels,
+        config={"focal_person": gen_couples[-1][0][0]},
+    )
+    t0 = time.perf_counter()
+    layout = _compute_dag_layout(ds, set())
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 3.0, f"_compute_dag_layout too slow: {elapsed:.3f}s"
+
+    nodes = layout["nodes"]
+    assert len(nodes) == len(inds)
+    for rel in rels:
+        if rel.type == "parent_child":
+            assert nodes[rel.person_1]["generation"] < nodes[rel.person_2]["generation"]
+
+    cw = layout["card_w"]
+    by_gen: dict[int, list[float]] = {}
+    for pos in nodes.values():
+        by_gen.setdefault(pos["generation"], []).append(pos["x"])
+    for xs in by_gen.values():
+        xs.sort()
+        for a, b in zip(xs, xs[1:], strict=False):
+            assert b - a >= cw + 20
+
+
+def test_viewer_server_cache_invalidation_and_fresh_viewer_state(tmp_path: Path) -> None:
+    """Server invalidates cached graph when data/ changes and always serves fresh viewer-state."""
+    import shutil
+
+    ws = tmp_path / "west-cache"
+    shutil.copytree(EXAMPLE_ROOT, ws)
+
+    server = make_viewer_server(ws, host="127.0.0.1", port=0, redact_living=True)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        # Warm cache
+        with urllib.request.urlopen(f"{base}/api/graph.json") as resp:
+            d1 = json.loads(resp.read().decode("utf-8"))
+        assert d1["meta"]["counts"]["individuals"] == 9
+
+        # Update build/viewer-state.json while data/ is unchanged -> GET / reflects immediately
+        req = urllib.request.Request(
+            f"{base}/api/viewer-state",
+            data=json.dumps({"selectedId": "I-WEST-EDGAR-1909"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+        with urllib.request.urlopen(f"{base}/") as resp:
+            assert '"selectedId": "I-WEST-EDGAR-1909"' in resp.read().decode("utf-8")
+
+        # Add a new individual file under data/individuals/ -> cache invalidates automatically
+        (ws / "data" / "individuals" / "I-WEST-EXTRA-1915.md").write_text(
+            "---\nid: I-WEST-EXTRA-1915\nprimary_name: Extra West\nsex: M\nstatus: tentative\n---\n",
+            encoding="utf-8",
+        )
+        with urllib.request.urlopen(f"{base}/api/graph.json") as resp:
+            d2 = json.loads(resp.read().decode("utf-8"))
+        assert d2["meta"]["counts"]["individuals"] == 10
+        assert "I-WEST-EXTRA-1915" in d2["individuals"]
     finally:
         server.shutdown()
         server.server_close()

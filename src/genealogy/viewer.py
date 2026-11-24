@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import bisect
 import datetime
 import json
 import mimetypes
+import os
 import re
+import threading
 import webbrowser
-from collections import defaultdict
+from collections import defaultdict, deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from genealogy.analysis import (
     REGIONAL_CENSUS_YEARS,
+    KinshipContext,
     _canonical_tract_group,
     _extract_discrepancy_bullets,
     compute_kinship,
@@ -26,7 +30,7 @@ from genealogy.analysis import (
     find_consanguineous_marriages,
     list_places_summary,
 )
-from genealogy.loader import Dataset, load_dataset
+from genealogy.loader import Dataset, load_dataset, load_workspace_config
 from genealogy.schema import parse_genealogy_date
 
 CARD_W = 216
@@ -91,9 +95,70 @@ def _generation_label(delta: int) -> str:
     return f"{-delta - 2}× Great-Grandchildren ({delta})"
 
 
+def _pair_cross_diff(a: list[int], b: list[int]) -> int:
+    """Return (# pairs x < y) - (# pairs x > y) for sorted external coordinate lists a, b."""
+    if not a or not b:
+        return 0
+    na, nb = len(a), len(b)
+    if a[-1] < b[0]:
+        return na * nb
+    if a[0] > b[-1]:
+        return -na * nb
+    lo = 0
+    hi = 0
+    diff = 0
+    for x in a:
+        while lo < nb and b[lo] < x:
+            lo += 1
+        if hi < lo:
+            hi = lo
+        while hi < nb and b[hi] <= x:
+            hi += 1
+        diff += (nb - hi) - lo
+    return diff
+
+
+def _fast_pair_cost_int(groups: list[list[int]], lxs2: list[int]) -> float:
+    """Exact crossing + squared-span cost via Fenwick tree on doubled integer coordinates."""
+    span2 = 0
+    max_r = 0
+    edge_count = 0
+    for us, lx2 in zip(groups, lxs2, strict=True):
+        for u2 in us:
+            d = u2 - lx2
+            span2 += d * d
+            r = u2 + 1
+            if r > max_r:
+                max_r = r
+            edge_count += 1
+    if edge_count <= 1 or max_r <= 1:
+        return span2 * 0.0125
+    bit = [0] * (max_r + 1)
+    crossings = 0
+    inserted = 0
+    for us in groups:
+        if not us:
+            continue
+        # Query all edges of this node before inserting so shared-endpoint edges never cross.
+        for u2 in us:
+            idx = u2 + 1
+            s = 0
+            while idx > 0:
+                s += bit[idx]
+                idx -= idx & -idx
+            crossings += inserted - s
+        for u2 in us:
+            idx = u2 + 1
+            while idx <= max_r:
+                bit[idx] += 1
+                idx += idx & -idx
+            inserted += 1
+    return crossings * 100.0 + span2 * 0.0125
+
+
 def _compute_dag_layout(
     ds: Dataset,
-    consanguineous_pairs: dict[tuple[str, str], dict[str, Any]],
+    consanguineous_pairs: dict[tuple[str, str], dict[str, Any]] | set[tuple[str, str]],
 ) -> dict[str, Any]:
     """Compute a generation-aligned, couple-paired DAG + Marriage-Hub layout minimizing crossings."""
     ind_ids = sorted(ds.individuals.keys())
@@ -117,36 +182,39 @@ def _compute_dag_layout(
     fan_of: dict[str, list[str]] = defaultdict(list)
     marriage_dates: dict[tuple[str, str], str] = {}
 
+    parents_seen: dict[str, set[str]] = defaultdict(set)
+    children_seen: dict[str, set[str]] = defaultdict(set)
+    spouses_seen: dict[str, set[str]] = defaultdict(set)
+    partners_seen: dict[str, set[str]] = defaultdict(set)
+    siblings_seen: dict[str, set[str]] = defaultdict(set)
+    fan_seen: dict[str, set[str]] = defaultdict(set)
+
+    def _add_dir(lst_map: dict[str, list[str]], seen_map: dict[str, set[str]], src: str, dst: str) -> None:
+        s = seen_map[src]
+        if dst not in s:
+            s.add(dst)
+            lst_map[src].append(dst)
+
     for rel in ds.relationships:
         if rel.person_1 not in ds.individuals or rel.person_2 not in ds.individuals:
             continue
         if rel.type == "parent_child":
-            if rel.person_1 not in parents_of[rel.person_2]:
-                parents_of[rel.person_2].append(rel.person_1)
-            if rel.person_2 not in children_of[rel.person_1]:
-                children_of[rel.person_1].append(rel.person_2)
+            _add_dir(parents_of, parents_seen, rel.person_2, rel.person_1)
+            _add_dir(children_of, children_seen, rel.person_1, rel.person_2)
         elif rel.type == "marriage":
-            if rel.person_2 not in spouses_of[rel.person_1]:
-                spouses_of[rel.person_1].append(rel.person_2)
-            if rel.person_1 not in spouses_of[rel.person_2]:
-                spouses_of[rel.person_2].append(rel.person_1)
-            if rel.person_2 not in partners_of[rel.person_1]:
-                partners_of[rel.person_1].append(rel.person_2)
-            if rel.person_1 not in partners_of[rel.person_2]:
-                partners_of[rel.person_2].append(rel.person_1)
+            _add_dir(spouses_of, spouses_seen, rel.person_1, rel.person_2)
+            _add_dir(spouses_of, spouses_seen, rel.person_2, rel.person_1)
+            _add_dir(partners_of, partners_seen, rel.person_1, rel.person_2)
+            _add_dir(partners_of, partners_seen, rel.person_2, rel.person_1)
             if rel.date:
-                key = tuple(sorted((rel.person_1, rel.person_2)))
+                key = (rel.person_1, rel.person_2) if rel.person_1 <= rel.person_2 else (rel.person_2, rel.person_1)
                 marriage_dates[key] = rel.date
         elif rel.type == "sibling":
-            if rel.person_2 not in siblings_of[rel.person_1]:
-                siblings_of[rel.person_1].append(rel.person_2)
-            if rel.person_1 not in siblings_of[rel.person_2]:
-                siblings_of[rel.person_2].append(rel.person_1)
+            _add_dir(siblings_of, siblings_seen, rel.person_1, rel.person_2)
+            _add_dir(siblings_of, siblings_seen, rel.person_2, rel.person_1)
         elif rel.type == "fan_associate":
-            if rel.person_2 not in fan_of[rel.person_1]:
-                fan_of[rel.person_1].append(rel.person_2)
-            if rel.person_1 not in fan_of[rel.person_2]:
-                fan_of[rel.person_2].append(rel.person_1)
+            _add_dir(fan_of, fan_seen, rel.person_1, rel.person_2)
+            _add_dir(fan_of, fan_seen, rel.person_2, rel.person_1)
 
     # Also treat co-parents (sharing a child) as partners so unmarried co-parents align
     for ps in parents_of.values():
@@ -154,15 +222,17 @@ def _compute_dag_layout(
             for i in range(len(ps)):
                 for j in range(i + 1, len(ps)):
                     a, b = ps[i], ps[j]
-                    if b not in partners_of[a]:
-                        partners_of[a].append(b)
-                    if a not in partners_of[b]:
-                        partners_of[b].append(a)
+                    _add_dir(partners_of, partners_seen, a, b)
+                    _add_dir(partners_of, partners_seen, b, a)
 
-    def _birth_year(iid: str) -> int:
+    birth_year: dict[str, int] = {}
+    sex_order: dict[str, int] = {}
+    for iid in ind_ids:
         ind = ds.individuals[iid].data
         b = parse_genealogy_date(ind.birth.date) if ind.birth else None
-        return b.year_min if b and b.year_min is not None else 9999
+        birth_year[iid] = b.year_min if b and b.year_min is not None else 9999
+        s = ind.sex
+        sex_order[iid] = 0 if s == "M" else (1 if s == "F" else 2)
 
     # Helper: longest ancestor depth for tie-breaking component anchors
     depth_memo: dict[str, int] = {}
@@ -173,7 +243,7 @@ def _compute_dag_layout(
         if iid in visiting:
             return 0
         visiting.add(iid)
-        ps = parents_of.get(iid, [])
+        ps = parents_of.get(iid, ())
         d = 0 if not ps else 1 + max(_anc_depth(p, visiting) for p in ps)
         visiting.remove(iid)
         depth_memo[iid] = d
@@ -191,20 +261,16 @@ def _compute_dag_layout(
         if start in visited_comp:
             continue
         comp: list[str] = []
-        q = [start]
+        q: deque[str] = deque([start])
         visited_comp.add(start)
         while q:
-            u = q.pop(0)
+            u = q.popleft()
             comp.append(u)
-            for nb in (
-                parents_of.get(u, [])
-                + children_of.get(u, [])
-                + partners_of.get(u, [])
-                + siblings_of.get(u, [])
-            ):
-                if nb not in visited_comp:
-                    visited_comp.add(nb)
-                    q.append(nb)
+            for adj in (parents_of, children_of, partners_of, siblings_of):
+                for nb in adj.get(u, ()):
+                    if nb not in visited_comp:
+                        visited_comp.add(nb)
+                        q.append(nb)
         components.append(comp)
 
     focal_id = ds.focal_person_id if ds.focal_person_id in ds.individuals else None
@@ -219,56 +285,60 @@ def _compute_dag_layout(
             candidates = sinks if sinks else comp
             anchor = max(
                 candidates,
-                key=lambda u: (depth_memo.get(u, 0), _birth_year(u) if _birth_year(u) < 9999 else -1, u),
+                key=lambda u: (depth_memo.get(u, 0), birth_year[u] if birth_year[u] < 9999 else -1, u),
             )
 
         # BFS from anchor: parents = -1, children = +1, partners/siblings = 0
         # Prioritize direct blood & partner links before explicit sibling links
         comp_gen: dict[str, int] = {anchor: 0}
-        queue = [anchor]
+        queue: deque[str] = deque([anchor])
         while queue:
-            u = queue.pop(0)
+            u = queue.popleft()
             gu = comp_gen[u]
-            for p in parents_of.get(u, []):
+            for p in parents_of.get(u, ()):
                 if p in comp_set and p not in comp_gen:
                     comp_gen[p] = gu - 1
                     queue.append(p)
-            for c in children_of.get(u, []):
+            for c in children_of.get(u, ()):
                 if c in comp_set and c not in comp_gen:
                     comp_gen[c] = gu + 1
                     queue.append(c)
-            for s in partners_of.get(u, []):
+            for s in partners_of.get(u, ()):
                 if s in comp_set and s not in comp_gen:
                     comp_gen[s] = gu
                     queue.append(s)
-            for sib in siblings_of.get(u, []):
+            for sib in siblings_of.get(u, ()):
                 if sib in comp_set and sib not in comp_gen:
                     comp_gen[sib] = gu
                     queue.append(sib)
 
-        # Phase B: Enforce hard DAG invariant gen[parent] <= gen[child] - 1
-        # Pull parent UP when an unequal-generation inosculation cycle creates a conflict
-        for _ in range(len(comp) + 2):
-            changed = False
-            for c in comp:
-                for p in parents_of.get(c, []):
-                    if p in comp_gen and comp_gen[p] >= comp_gen[c]:
-                        comp_gen[p] = comp_gen[c] - 1
-                        changed = True
-            if not changed:
-                break
+        # Phase B: Enforce hard DAG invariant gen[parent] <= gen[child] - 1 using active-queue relaxation
+        active: deque[str] = deque(comp)
+        in_active: set[str] = set(comp)
+        relax_count: dict[str, int] = defaultdict(int)
+        max_relax = len(comp) + 2
+        while active:
+            c = active.popleft()
+            in_active.discard(c)
+            gc = comp_gen[c]
+            for p in parents_of.get(c, ()):
+                if p in comp_gen and comp_gen[p] >= gc and relax_count[p] < max_relax:
+                    comp_gen[p] = gc - 1
+                    relax_count[p] += 1
+                    if p not in in_active:
+                        in_active.add(p)
+                        active.append(p)
 
         # Re-align rootless/unconstrained spouses if their partner was pulled up
         for _ in range(2):
             for u in comp:
                 if parents_of.get(u) or children_of.get(u):
                     continue
-                sp_gens = [comp_gen[s] for s in partners_of.get(u, []) if s in comp_gen]
+                sp_gens = [comp_gen[s] for s in partners_of.get(u, ()) if s in comp_gen]
                 if sp_gens:
                     comp_gen[u] = sp_gens[0]
 
-        for u, g in comp_gen.items():
-            raw_gen[u] = g
+        raw_gen.update(comp_gen)
 
     # Step 2: Pull FAN-only isolated individuals to their connected associate's generation
     for rel in ds.relationships:
@@ -287,10 +357,6 @@ def _compute_dag_layout(
         layers[rank[iid]].append(iid)
     sorted_ranks = sorted(layers.keys())
 
-    def _sex_order(iid: str) -> int:
-        s = ds.individuals[iid].data.sex
-        return 0 if s == "M" else (1 if s == "F" else 2)
-
     # Build atomic horizontal units per layer (spouses/co-parents stay adjacent!)
     row_units: dict[int, list[list[str]]] = {}
     for r in sorted_ranks:
@@ -298,10 +364,17 @@ def _compute_dag_layout(
         same_row_partners: dict[str, list[str]] = {}
         for u in layers[r]:
             # Prefer explicit marriages before co-parent-only links
-            married = [s for s in spouses_of.get(u, []) if s in row_set]
-            other = [s for s in partners_of.get(u, []) if s in row_set and s not in married]
+            married = [s for s in spouses_of.get(u, ()) if s in row_set]
+            married_set = set(married)
+            other = [s for s in partners_of.get(u, ()) if s in row_set and s not in married_set]
             # Sort partners by marriage date then birth year
-            married.sort(key=lambda s: (marriage_dates.get(tuple(sorted((u, s))), "9999"), _birth_year(s), s))
+            married.sort(
+                key=lambda s: (
+                    marriage_dates.get((u, s) if u <= s else (s, u), "9999"),
+                    birth_year[s],
+                    s,
+                )
+            )
             same_row_partners[u] = married + other
 
         used: set[str] = set()
@@ -309,7 +382,7 @@ def _compute_dag_layout(
         # Deterministic ordering: process multi-spouse hubs first, then couples, then singles
         ordered_nodes = sorted(
             layers[r],
-            key=lambda u: (-len(same_row_partners[u]), _birth_year(u), u),
+            key=lambda u: (-len(same_row_partners[u]), birth_year[u], u),
         )
         for u in ordered_nodes:
             if u in used:
@@ -323,7 +396,7 @@ def _compute_dag_layout(
                 used.add(u)
                 used.add(v)
                 pair = [u, v]
-                pair.sort(key=lambda x: (_sex_order(x), _birth_year(x), x))
+                pair.sort(key=lambda x: (sex_order[x], birth_year[x], x))
                 units.append(pair)
             else:
                 # 2+ spouses in same row: place u in the middle of its first two spouses [s1, u, s2]
@@ -333,128 +406,238 @@ def _compute_dag_layout(
                 used.add(s2)
                 units.append([s1, u, s2])
 
-        units.sort(key=lambda unit: (min(_birth_year(x) for x in unit), unit[0]))
+        units.sort(key=lambda unit: (min(birth_year[x] for x in unit), unit[0]))
         row_units[r] = units
 
     # Step 4: Crossing minimization (barycenter sweeps on units + internal couple orientation flip)
-    def _node_x_index() -> dict[str, float]:
-        pos: dict[str, float] = {}
-        for r in sorted_ranks:
-            cursor = 0.0
-            for unit in row_units[r]:
-                for iid in unit:
-                    pos[iid] = cursor
-                    cursor += 1.0
-                cursor += 0.5
-        return pos
+    # Doubled coordinates (`pos2`): +2 per node in unit, +1 between units (so all coords are exact integers).
+    pos2: dict[str, int] = {}
+
+    def _update_row_pos2(r: int) -> None:
+        cur2 = 0
+        for unit in row_units[r]:
+            for iid in unit:
+                pos2[iid] = cur2
+                cur2 += 2
+            cur2 += 1
+
+    for r in sorted_ranks:
+        _update_row_pos2(r)
 
     for _ in range(8):
-        # Downward sweep: order by parents
-        pos = _node_x_index()
+        # Downward sweep: order by parents (snapshot matches full-pass _node_x_index semantics)
+        snap = dict(pos2)
         for r in sorted_ranks[1:]:
-            new_units: list[list[str]] = []
             scored: list[tuple[float, int, str, list[str]]] = []
             for unit in row_units[r]:
                 # Flip 2-person couple if both have parents and swapping removes an X-crossing
                 if len(unit) == 2:
                     a, b = unit[0], unit[1]
-                    pa = [pos[p] for p in parents_of.get(a, []) if p in pos]
-                    pb = [pos[p] for p in parents_of.get(b, []) if p in pos]
+                    pa = [snap[p] for p in parents_of.get(a, ()) if p in snap]
+                    pb = [snap[p] for p in parents_of.get(b, ()) if p in snap]
                     if pa and pb and (sum(pa) / len(pa)) > (sum(pb) / len(pb)):
                         unit = [b, a]
-                all_p = [pos[p] for m in unit for p in parents_of.get(m, []) if p in pos]
+                all_p = [snap[p] for m in unit for p in parents_of.get(m, ()) if p in snap]
                 if all_p:
                     bary = sum(all_p) / len(all_p)
                 else:
-                    bary = sum(pos[m] for m in unit) / len(unit)
-                scored.append((bary, min(_birth_year(m) for m in unit), unit[0], unit))
+                    bary = sum(snap[m] for m in unit) / len(unit)
+                scored.append((bary, min(birth_year[m] for m in unit), unit[0], unit))
             scored.sort(key=lambda t: (t[0], t[1], t[2]))
-            new_units = [t[3] for t in scored]
-            row_units[r] = new_units
+            row_units[r] = [t[3] for t in scored]
+            _update_row_pos2(r)
 
         # Upward sweep: order by children
-        pos = _node_x_index()
+        snap = dict(pos2)
         for r in reversed(sorted_ranks[:-1]):
             scored_up: list[tuple[float, int, str, list[str]]] = []
             for unit in row_units[r]:
-                all_c = [pos[c] for m in unit for c in children_of.get(m, []) if c in pos]
+                all_c = [snap[c] for m in unit for c in children_of.get(m, ()) if c in snap]
                 if all_c:
                     bary = sum(all_c) / len(all_c)
                 else:
-                    bary = sum(pos[m] for m in unit) / len(unit)
-                scored_up.append((bary, min(_birth_year(m) for m in unit), unit[0], unit))
+                    bary = sum(snap[m] for m in unit) / len(unit)
+                scored_up.append((bary, min(birth_year[m] for m in unit), unit[0], unit))
             scored_up.sort(key=lambda t: (t[0], t[1], t[2]))
             row_units[r] = [t[3] for t in scored_up]
+            _update_row_pos2(r)
 
     # Step 4b: Exact crossing-count + span 2-opt optimization (escapes barycenter local minima like double-X inversions)
-    def _row_cost(r: int, pos_map: dict[str, float]) -> float:
-        # Compute local pos for row r from current row_units[r]
-        local_pos: dict[str, float] = {}
-        cur = 0.0
+    row_sets: dict[int, set[str]] = {r: set(layers[r]) for r in sorted_ranks}
+    has_intra_row: dict[int, bool] = {}
+    for r in sorted_ranks:
+        rs = row_sets[r]
+        has_intra_row[r] = any(
+            (p in rs) or (c in rs)
+            for u in rs
+            for p, c in ((p0, None) for p0 in parents_of.get(u, ()))
+        ) or any(c in rs for u in rs for c in children_of.get(u, ()))
+    simple_between: dict[tuple[int, int], bool] = {}
+    for idx_r in range(1, len(sorted_ranks)):
+        ra, rb = sorted_ranks[idx_r - 1], sorted_ranks[idx_r]
+        sa, sb = row_sets[ra], row_sets[rb]
+        simple_between[(ra, rb)] = (
+            all(c in sb for u in sa for c in children_of.get(u, ()))
+            and all(p in sa for u in sb for p in parents_of.get(u, ()))
+        )
+
+    def _row_cost_up(r: int, pm2: dict[str, int]) -> float:
+        groups_up: list[list[int]] = []
+        lxs2: list[int] = []
+        cur2 = 0
         for unit in row_units[r]:
             for iid in unit:
-                local_pos[iid] = cur
-                cur += 1.0
-            cur += 0.5
+                lxs2.append(cur2)
+                groups_up.append([pm2[p] for p in parents_of.get(iid, ()) if p in pm2])
+                cur2 += 2
+            cur2 += 1
+        return _fast_pair_cost_int(groups_up, lxs2)
 
-        def _pair_cost(edges_uv: list[tuple[float, float]]) -> float:
-            m = len(edges_uv)
-            if m <= 1:
-                return sum((u - v) ** 2 for u, v in edges_uv) * 0.05
-            crossings = 0
-            span = 0.0
-            for i in range(m):
-                u1, v1 = edges_uv[i]
-                span += (u1 - v1) ** 2
-                for j in range(i + 1, m):
-                    u2, v2 = edges_uv[j]
-                    if (u1 - u2) * (v1 - v2) < 0:
-                        crossings += 1
-            return crossings * 100.0 + span * 0.05
-
-        up_edges: list[tuple[float, float]] = []
-        down_edges: list[tuple[float, float]] = []
+    def _row_cost_down(r: int, pm2: dict[str, int]) -> float:
+        groups_dn: list[list[int]] = []
+        lxs2: list[int] = []
+        cur2 = 0
         for unit in row_units[r]:
             for iid in unit:
-                lx = local_pos[iid]
-                for p in parents_of.get(iid, []):
-                    if p in pos_map:
-                        up_edges.append((pos_map[p], lx))
-                for c in children_of.get(iid, []):
-                    if c in pos_map:
-                        down_edges.append((lx, pos_map[c]))
-        return _pair_cost(up_edges) + _pair_cost(down_edges)
+                lxs2.append(cur2)
+                groups_dn.append([pm2[c] for c in children_of.get(iid, ()) if c in pm2])
+                cur2 += 2
+            cur2 += 1
+        return _fast_pair_cost_int(groups_dn, lxs2)
 
+    def _row_cost(r: int, pm2: dict[str, int]) -> float:
+        return _row_cost_up(r, pm2) + _row_cost_down(r, pm2)
+
+    sweep_ranks = list(sorted_ranks) + list(reversed(sorted_ranks))
     for _ in range(6):
         improved_any = False
-        for r in list(sorted_ranks) + list(reversed(sorted_ranks)):
+        for r in sweep_ranks:
             units = row_units[r]
             k = len(units)
             if k == 0:
                 continue
-            pos_map = _node_x_index()
-            best_cost = _row_cost(r, pos_map)
+
+            if has_intra_row[r]:
+                # Fallback for cyclic datasets containing same-generation parent/child edges
+                pm2_snap = dict(pos2)
+                best_cost = _row_cost(r, pm2_snap)
+                for i in range(k):
+                    if len(units[i]) == 2:
+                        units[i] = [units[i][1], units[i][0]]
+                        c = _row_cost(r, pm2_snap)
+                        if c + 1e-6 < best_cost:
+                            best_cost = c
+                            improved_any = True
+                        else:
+                            units[i] = [units[i][1], units[i][0]]
+                max_dist = k if k <= 30 else 14
+                for i in range(k):
+                    for j in range(i + 1, min(k, i + max_dist + 1)):
+                        units[i], units[j] = units[j], units[i]
+                        c = _row_cost(r, pm2_snap)
+                        if c + 1e-6 < best_cost:
+                            best_cost = c
+                            improved_any = True
+                        else:
+                            units[i], units[j] = units[j], units[i]
+                _update_row_pos2(r)
+                continue
+
+            # Exact incremental O(1)/O(deg) crossing + span 2-opt for acyclic rows
+            descs: list[list[Any]] = []
+            x0_2: list[int] = []
+            cur2 = 0
+            for idx_u, unit in enumerate(units):
+                x0_2.append(cur2)
+                up_xs2 = sorted(pos2[p] for m in unit for p in parents_of.get(m, ()) if p in pos2)
+                dn_xs2 = sorted(pos2[c] for m in unit for c in children_of.get(m, ()) if c in pos2)
+                deg = len(up_xs2) + len(dn_xs2)
+                sum_ud2 = 0
+                for d, m in enumerate(unit):
+                    d2 = 2 * d
+                    for p in parents_of.get(m, ()):
+                        if p in pos2:
+                            sum_ud2 += pos2[p] - d2
+                    for c in children_of.get(m, ()):
+                        if c in pos2:
+                            sum_ud2 += pos2[c] - d2
+                descs.append([idx_u, up_xs2, dn_xs2, deg, sum_ud2, len(unit)])
+                cur2 += 2 * len(unit) + 1
+
             # Try flipping 2-person couples
             for i in range(k):
-                if len(units[i]) == 2:
-                    units[i] = [units[i][1], units[i][0]]
-                    c = _row_cost(r, pos_map)
-                    if c + 1e-6 < best_cost:
-                        best_cost = c
+                u = units[i]
+                if len(u) == 2:
+                    a, b = u[0], u[1]
+                    up_a2 = sorted(pos2[p] for p in parents_of.get(a, ()) if p in pos2)
+                    up_b2 = sorted(pos2[p] for p in parents_of.get(b, ()) if p in pos2)
+                    dn_a2 = sorted(pos2[c] for c in children_of.get(a, ()) if c in pos2)
+                    dn_b2 = sorted(pos2[c] for c in children_of.get(b, ()) if c in pos2)
+                    deg_a = len(up_a2) + len(dn_a2)
+                    deg_b = len(up_b2) + len(dn_b2)
+                    sum_a2 = sum(up_a2) + sum(dn_a2)
+                    sum_b2 = sum(up_b2) + sum(dn_b2)
+                    dcross = _pair_cross_diff(up_a2, up_b2) + _pair_cross_diff(dn_a2, dn_b2)
+                    dspan2 = 4 * (x0_2[i] + 1) * (deg_a - deg_b) - 4 * (sum_a2 - sum_b2)
+                    if dcross * 100.0 + dspan2 * 0.0125 < -1e-6:
+                        units[i] = [b, a]
+                        descs[i][4] = sum_b2 + sum_a2 - 2 * deg_a
                         improved_any = True
-                    else:
-                        units[i] = [units[i][1], units[i][0]]
+
             # Try 2-opt unit swaps (all pairs for k <= 30, windowed for huge layers)
+            d_cache: list[dict[int, int]] = [{} for _ in range(k)]
+
+            def _get_cdiff(da: list[Any], db: list[Any], _cache: list[dict[int, int]] = d_cache) -> int:
+                ua_id = da[0]
+                ub_id = db[0]
+                row_d = _cache[ua_id]
+                val = row_d.get(ub_id)
+                if val is None:
+                    val = _pair_cross_diff(da[1], db[1]) + _pair_cross_diff(da[2], db[2])
+                    row_d[ub_id] = val
+                    _cache[ub_id][ua_id] = -val
+                return val
+
             max_dist = k if k <= 30 else 14
             for i in range(k):
+                di = descs[i]
+                ui_deg, ui_sud2, ui_w = di[3], di[4], di[5]
+                sum_it = 0
                 for j in range(i + 1, min(k, i + max_dist + 1)):
-                    units[i], units[j] = units[j], units[i]
-                    c = _row_cost(r, pos_map)
-                    if c + 1e-6 < best_cost:
-                        best_cost = c
-                        improved_any = True
+                    dj = descs[j]
+                    uj_deg, uj_sud2, uj_w = dj[3], dj[4], dj[5]
+                    if j > i + 1:
+                        sum_it += _get_cdiff(di, descs[j - 1])
+                    dcross = _get_cdiff(di, dj) + sum_it
+                    shift2 = 2 * (uj_w - ui_w)
+                    dspan2 = 0
+                    if shift2 == 0:
+                        for t in range(i + 1, j):
+                            dcross += _get_cdiff(descs[t], dj)
                     else:
+                        for t in range(i + 1, j):
+                            dt = descs[t]
+                            dcross += _get_cdiff(dt, dj)
+                            dspan2 += shift2 * ((2 * x0_2[t] + shift2) * dt[3] - 2 * dt[4])
+                    xi = x0_2[i]
+                    xj = x0_2[j]
+                    xi_new = xj + shift2
+                    dspan2 += (xi_new - xi) * ((xi_new + xi) * ui_deg - 2 * ui_sud2)
+                    dspan2 += (xi - xj) * ((xi + xj) * uj_deg - 2 * uj_sud2)
+                    if dcross * 100.0 + dspan2 * 0.0125 < -1e-6:
                         units[i], units[j] = units[j], units[i]
+                        descs[i], descs[j] = descs[j], descs[i]
+                        if shift2 != 0:
+                            for t in range(i + 1, j + 1):
+                                x0_2[t] += shift2
+                        di = descs[i]
+                        ui_deg, ui_sud2, ui_w = di[3], di[4], di[5]
+                        sum_it = 0
+                        for t in range(i + 1, j):
+                            sum_it += _get_cdiff(di, descs[t])
+                        improved_any = True
+
+            _update_row_pos2(r)
 
         # Coupled 2-layer move: flip a 2-person couple [a, b] in row r, swap their two parent units in row r-1,
         # and let unconstrained units in row r-2 re-align by child barycenter before measuring total crossings.
@@ -462,61 +645,107 @@ def _compute_dag_layout(
             r = sorted_ranks[idx_r]
             r_prev = sorted_ranks[idx_r - 1]
             r_prev2 = sorted_ranks[idx_r - 2] if idx_r >= 2 else None
-            prev_units = row_units[r_prev]
-            node_to_prev_u: dict[str, int] = {}
-            for ui, u in enumerate(prev_units):
-                for m in u:
-                    node_to_prev_u[m] = ui
+            s_prev_r = simple_between[(r_prev, r)]
+            s_p2_prev = simple_between[(r_prev2, r_prev)] if r_prev2 is not None else False
+            node_to_prev_u: dict[str, int] = {
+                m: ui for ui, u in enumerate(row_units[r_prev]) for m in u
+            }
+            cached_before: tuple[float, float, float, float, float, float] | None = None
+
             for i, unit in enumerate(row_units[r]):
                 if len(unit) != 2:
                     continue
                 a, b = unit[0], unit[1]
-                ua_set = {node_to_prev_u[p] for p in parents_of.get(a, []) if p in node_to_prev_u}
-                ub_set = {node_to_prev_u[p] for p in parents_of.get(b, []) if p in node_to_prev_u}
+                ua_set = {node_to_prev_u[p] for p in parents_of.get(a, ()) if p in node_to_prev_u}
+                ub_set = {node_to_prev_u[p] for p in parents_of.get(b, ()) if p in node_to_prev_u}
                 if len(ua_set) != 1 or len(ub_set) != 1:
                     continue
                 ua, ub = next(iter(ua_set)), next(iter(ub_set))
                 if ua == ub:
                     continue
-                saved_r = [list(u) for u in row_units[r]]
-                saved_prev = [list(u) for u in row_units[r_prev]]
-                saved_prev2 = [list(u) for u in row_units[r_prev2]] if r_prev2 is not None else None
 
-                pos_before = _node_x_index()
-                cost_before = _row_cost(r_prev, pos_before) + _row_cost(r, pos_before)
-                if r_prev2 is not None:
-                    cost_before += _row_cost(r_prev2, pos_before)
+                if cached_before is None:
+                    c_prev_u = _row_cost_up(r_prev, pos2)
+                    c_prev_d = _row_cost_down(r_prev, pos2)
+                    c_r_u = c_prev_d if s_prev_r else _row_cost_up(r, pos2)
+                    c_r_d = _row_cost_down(r, pos2)
+                    if r_prev2 is not None:
+                        c_p2_u = _row_cost_up(r_prev2, pos2)
+                        c_p2_d = c_prev_u if s_p2_prev else _row_cost_down(r_prev2, pos2)
+                    else:
+                        c_p2_u = 0.0
+                        c_p2_d = 0.0
+                    cached_before = (c_prev_u, c_prev_d, c_r_u, c_r_d, c_p2_u, c_p2_d)
+                cost_before = sum(cached_before)
+
+                if not has_intra_row[r]:
+                    dn_a2 = sorted(pos2[c] for c in children_of.get(a, ()) if c in pos2)
+                    dn_b2 = sorted(pos2[c] for c in children_of.get(b, ()) if c in pos2)
+                    xa2 = pos2[a]
+                    d_r_d = (
+                        _pair_cross_diff(dn_a2, dn_b2) * 100.0
+                        + (4 * (xa2 + 1) * (len(dn_a2) - len(dn_b2)) - 4 * (sum(dn_a2) - sum(dn_b2)))
+                        * 0.0125
+                    )
+                    c_r_d_a = cached_before[3] + d_r_d
+                else:
+                    c_r_d_a = None  # compute after mutating pos2
 
                 row_units[r][i] = [b, a]
-                row_units[r_prev][ua], row_units[r_prev][ub] = row_units[r_prev][ub], row_units[r_prev][ua]
+                row_units[r_prev][ua], row_units[r_prev][ub] = (
+                    row_units[r_prev][ub],
+                    row_units[r_prev][ua],
+                )
+                _update_row_pos2(r)
+                _update_row_pos2(r_prev)
+
+                prev2_changed = False
+                saved_prev2: list[list[str]] | None = None
                 if r_prev2 is not None:
                     # Re-sort r_prev2 by child barycenter so leaf/unconstrained parents follow their children
-                    pos_mid = _node_x_index()
                     scored_p2 = []
                     for u2 in row_units[r_prev2]:
-                        cs = [pos_mid[c] for m in u2 for c in children_of.get(m, []) if c in pos_mid]
-                        bary = sum(cs) / len(cs) if cs else sum(pos_mid[m] for m in u2) / len(u2)
-                        scored_p2.append((bary, min(_birth_year(m) for m in u2), u2[0], u2))
+                        cs = [pos2[c] for m in u2 for c in children_of.get(m, ()) if c in pos2]
+                        bary = sum(cs) / len(cs) if cs else sum(pos2[m] for m in u2) / len(u2)
+                        scored_p2.append((bary, min(birth_year[m] for m in u2), u2[0], u2))
                     scored_p2.sort(key=lambda t: (t[0], t[1], t[2]))
-                    row_units[r_prev2] = [t[3] for t in scored_p2]
+                    new_p2 = [t[3] for t in scored_p2]
+                    if new_p2 != row_units[r_prev2]:
+                        prev2_changed = True
+                        saved_prev2 = row_units[r_prev2]
+                        row_units[r_prev2] = new_p2
+                        _update_row_pos2(r_prev2)
 
-                pos_after = _node_x_index()
-                cost_after = _row_cost(r_prev, pos_after) + _row_cost(r, pos_after)
+                c_prev_u_a = _row_cost_up(r_prev, pos2)
+                c_prev_d_a = _row_cost_down(r_prev, pos2)
+                c_r_u_a = c_prev_d_a if s_prev_r else _row_cost_up(r, pos2)
+                if c_r_d_a is None:
+                    c_r_d_a = _row_cost_down(r, pos2)
                 if r_prev2 is not None:
-                    cost_after += _row_cost(r_prev2, pos_after)
+                    c_p2_u_a = _row_cost_up(r_prev2, pos2) if prev2_changed else cached_before[4]
+                    c_p2_d_a = c_prev_u_a if s_p2_prev else _row_cost_down(r_prev2, pos2)
+                else:
+                    c_p2_u_a = 0.0
+                    c_p2_d_a = 0.0
+                cost_after = c_prev_u_a + c_prev_d_a + c_r_u_a + c_r_d_a + c_p2_u_a + c_p2_d_a
 
                 if cost_after + 1e-6 < cost_before:
                     improved_any = True
-                    # Refresh node_to_prev_u since row_units[r_prev] changed
-                    node_to_prev_u.clear()
-                    for ui, u in enumerate(row_units[r_prev]):
-                        for m in u:
-                            node_to_prev_u[m] = ui
+                    cached_before = (c_prev_u_a, c_prev_d_a, c_r_u_a, c_r_d_a, c_p2_u_a, c_p2_d_a)
+                    node_to_prev_u = {
+                        m: ui for ui, u in enumerate(row_units[r_prev]) for m in u
+                    }
                 else:
-                    row_units[r] = saved_r
-                    row_units[r_prev] = saved_prev
-                    if r_prev2 is not None and saved_prev2 is not None:
+                    row_units[r][i] = [a, b]
+                    row_units[r_prev][ua], row_units[r_prev][ub] = (
+                        row_units[r_prev][ub],
+                        row_units[r_prev][ua],
+                    )
+                    _update_row_pos2(r)
+                    _update_row_pos2(r_prev)
+                    if prev2_changed and saved_prev2 is not None:
                         row_units[r_prev2] = saved_prev2
+                        _update_row_pos2(r_prev2)
         if not improved_any:
             break
 
@@ -616,8 +845,7 @@ def _compute_dag_layout(
     hub_map: dict[tuple[str, ...], dict[str, Any]] = {}
     for rel in ds.relationships:
         if rel.type == "marriage" and rel.person_1 in nodes_pos and rel.person_2 in nodes_pos:
-            key = tuple(sorted((rel.person_1, rel.person_2)))
-            kin = consanguineous_pairs.get(key)
+            key = (rel.person_1, rel.person_2) if rel.person_1 <= rel.person_2 else (rel.person_2, rel.person_1)
             hub_map[key] = {
                 "parents": list(key),
                 "children": [],
@@ -629,8 +857,8 @@ def _compute_dag_layout(
                     "sources": rel.sources,
                     "notes": rel.notes,
                 },
-                "consanguineous": kin is not None,
-                "kinship": kin,
+                "consanguineous": key in consanguineous_pairs,
+                "kinship": None,
             }
 
     for cid, ps in sorted(parents_of.items()):
@@ -756,28 +984,46 @@ def _compute_dag_layout(
     for g_iv in row_intervals.values():
         g_iv.sort()
 
+    clear_cands_cache: dict[tuple[int, int], list[float]] = {}
+
     def _find_clear_route_x(g_start: int, g_end: int, preferred_x: float) -> float | None:
         if g_end - g_start <= 1:
             return None
-        blocked: list[tuple[float, float]] = []
-        for g in range(g_start + 1, g_end):
-            blocked.extend(row_intervals.get(g, []))
-        if not blocked:
+        key = (g_start, g_end)
+        cands = clear_cands_cache.get(key)
+        if cands is None:
+            blocked: list[tuple[float, float]] = []
+            for g in range(g_start + 1, g_end):
+                blocked.extend(row_intervals.get(g, ()))
+            if not blocked:
+                clear_cands_cache[key] = []
+                return None
+            blocked.sort()
+            merged: list[tuple[float, float]] = [blocked[0]]
+            for s, e in blocked[1:]:
+                ps, pe = merged[-1]
+                if s <= pe:
+                    merged[-1] = (ps, max(pe, e))
+                else:
+                    merged.append((s, e))
+            # Candidate clear X positions: left of all, midpoints of gaps, right of all
+            cands = [merged[0][0] - 18.0]
+            for i in range(len(merged) - 1):
+                if merged[i + 1][0] - merged[i][1] >= 12.0:
+                    cands.append((merged[i][1] + merged[i + 1][0]) / 2.0)
+            cands.append(merged[-1][1] + 18.0)
+            clear_cands_cache[key] = cands
+        if not cands:
             return None
-        blocked.sort()
-        merged: list[tuple[float, float]] = [blocked[0]]
-        for s, e in blocked[1:]:
-            ps, pe = merged[-1]
-            if s <= pe:
-                merged[-1] = (ps, max(pe, e))
-            else:
-                merged.append((s, e))
-        # Candidate clear X positions: left of all, midpoints of gaps, right of all
-        cands: list[float] = [merged[0][0] - 18.0, merged[-1][1] + 18.0]
-        for i in range(len(merged) - 1):
-            if merged[i + 1][0] - merged[i][1] >= 12.0:
-                cands.append((merged[i][1] + merged[i + 1][0]) / 2.0)
-        return round(min(cands, key=lambda cx: abs(cx - preferred_x)), 1)
+        idx = bisect.bisect_left(cands, preferred_x)
+        if idx == 0:
+            return round(cands[0], 1)
+        if idx == len(cands):
+            return round(cands[-1], 1)
+        left = cands[idx - 1]
+        right = cands[idx]
+        best = left if abs(left - preferred_x) <= abs(right - preferred_x) else right
+        return round(best, 1)
 
     for h in hubs:
         hid = h["id"]
@@ -865,6 +1111,52 @@ def _extract_formal_citation(body: str, fallback: str) -> str:
     return " ".join(lines) if lines else fallback
 
 
+def _build_trie_regex(words: list[str]) -> str:
+    """Compile a prefix-trie regex pattern over case-normalized strings for O(N) redaction."""
+    trie: dict[str, Any] = {}
+    for w in sorted({w.lower() for w in words if w}, key=len, reverse=True):
+        node = trie
+        for ch in w:
+            node = node.setdefault(ch, {})
+        node[""] = True
+
+    def _emit(node: dict[str, Any]) -> str:
+        prefix_parts: list[str] = []
+        cur = node
+        while "" not in cur and len(cur) == 1:
+            ch, nxt = next(iter(cur.items()))
+            prefix_parts.append(re.escape(ch))
+            cur = nxt
+        prefix = "".join(prefix_parts)
+        has_end = "" in cur
+        children = [(k, v) for k, v in cur.items() if k != ""]
+        if not children:
+            return prefix
+        single_chars = [k for k, v in children if len(v) == 1 and "" in v]
+        complex_parts = [re.escape(k) + _emit(v) for k, v in children if not (len(v) == 1 and "" in v)]
+        if single_chars:
+            if len(single_chars) == 1:
+                complex_parts.append(re.escape(single_chars[0]))
+            else:
+                complex_parts.append("[" + "".join(re.escape(c) for c in single_chars) + "]")
+        if len(complex_parts) == 1:
+            body = complex_parts[0]
+            if has_end:
+                suffix = (
+                    f"(?:{body})?"
+                    if len(body) > 1 and not (body.startswith("[") and body.endswith("]"))
+                    else f"{body}?"
+                )
+            else:
+                suffix = body
+        else:
+            joined = "|".join(complex_parts)
+            suffix = f"(?:{joined})?" if has_end else f"(?:{joined})"
+        return prefix + suffix
+
+    return _emit(trie)
+
+
 def _build_living_redactor(ds: Dataset) -> Any:
     """Return a function that replaces living individuals' names/variants with '[Living]'."""
     names: set[str] = set()
@@ -877,10 +1169,7 @@ def _build_living_redactor(ds: Dataset) -> Any:
                     names.add(v.strip())
     if not names:
         return lambda text: text
-    pattern = re.compile(
-        "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)),
-        re.IGNORECASE,
-    )
+    pattern = re.compile(_build_trie_regex(list(names)), re.IGNORECASE)
     return lambda text: pattern.sub("[Living]", text) if text else text
 
 
@@ -888,51 +1177,63 @@ def build_viewer_payload(
     root: Path | str | Dataset,
     *,
     redact_living: bool = True,
+    _ctx: KinshipContext | None = None,
 ) -> dict[str, Any]:
     """Build the full JSON payload consumed by the interactive HTML viewer."""
     ds = root if isinstance(root, Dataset) else load_dataset(root)
+    ctx = _ctx if _ctx is not None else KinshipContext(ds)
     scrub = _build_living_redactor(ds) if redact_living else (lambda t: t)
 
-    consanguineous_list = find_consanguineous_marriages(ds)
-    consanguineous_pairs: dict[tuple[str, str], dict[str, Any]] = {}
-    for rep in consanguineous_list:
-        key = tuple(sorted((rep.person_a, rep.person_b)))
-        consanguineous_pairs[key] = rep.to_dict()
+    consanguineous_list = find_consanguineous_marriages(ds, _ctx=ctx)
+    consanguineous_dicts = [r.to_dict() for r in consanguineous_list]
+    consanguineous_pair_keys = {
+        (rep["person_a"], rep["person_b"])
+        if rep["person_a"] <= rep["person_b"]
+        else (rep["person_b"], rep["person_a"])
+        for rep in consanguineous_dicts
+    }
 
-    layout = _compute_dag_layout(ds, consanguineous_pairs)
+    layout = _compute_dag_layout(ds, consanguineous_pair_keys)
 
-    # Pre-index excluded leads per individual
+    # Pre-index excluded leads, relationship sources, and census years in single O(S + R) passes
     excluded_by_ind: dict[str, list[str]] = defaultdict(list)
+    census_year_by_sid: dict[str, int] = {}
     for sid, src in ds.sources.items():
         if src.data.relevance == "excluded":
             for iid in src.data.excluded_for:
                 excluded_by_ind[iid].append(sid)
+        elif src.data.record_type == "census":
+            sd = parse_genealogy_date(src.data.date)
+            if sd and sd.year_min:
+                census_year_by_sid[sid] = sd.year_min
+
+    rel_sources_by_ind: dict[str, set[str]] = defaultdict(set)
+    for rel in ds.relationships:
+        if rel.sources:
+            rel_sources_by_ind[rel.person_1].update(rel.sources)
+            rel_sources_by_ind[rel.person_2].update(rel.sources)
+
+    living_ids = {iid for iid, ind in ds.individuals.items() if ind.data.living}
 
     individuals_out: dict[str, dict[str, Any]] = {}
     for iid in sorted(ds.individuals.keys()):
         loaded = ds.individuals[iid]
         d = loaded.data
-        collapse = compute_pedigree_collapse(ds, iid)
+        collapse = compute_pedigree_collapse(ds, iid, _ctx=ctx)
         collapse_dict = collapse.to_dict()
 
         # Collect all linked sources (profile + relationships)
-        sids = set(d.all_source_ids())
-        for rel in ds.relationships:
-            if iid in (rel.person_1, rel.person_2):
-                sids.update(rel.sources)
+        sids = d.all_source_ids()
+        rel_sids = rel_sources_by_ind.get(iid)
+        if rel_sids:
+            sids.update(rel_sids)
 
         b_parsed = parse_genealogy_date(d.birth.date) if d.birth else None
         d_parsed = parse_genealogy_date(d.death.date) if d.death else None
         b_year = b_parsed.year_min if b_parsed else None
         d_year = d_parsed.year_max if d_parsed else None
 
-        covered_censuses: set[int] = set()
-        for sid in sids:
-            src_obj = ds.sources.get(sid)
-            if src_obj and src_obj.data.record_type == "census" and src_obj.data.relevance != "excluded":
-                sd = parse_genealogy_date(src_obj.data.date)
-                if sd and sd.year_min:
-                    covered_censuses.add(sd.year_min)
+        covered_censuses = {census_year_by_sid[sid] for sid in sids if sid in census_year_by_sid}
 
         ind_regions = detect_individual_regions(ds, iid)
         applicable_censuses: set[int] = set()
@@ -1029,11 +1330,20 @@ def build_viewer_payload(
         for tr in tracts_raw:
             for entry in tr["entries"]:
                 iid = entry["individual_id"]
-                if iid in ds.individuals and ds.individuals[iid].data.living:
+                if iid in living_ids:
                     entry["primary_name"] = "Living (Redacted)"
                 entry["description"] = scrub(entry["description"])
 
-    places_raw = [_redact_place_profile(compute_place_profile(ds, pid), ds, scrub, redact_living) for pid in sorted(ds.places)]
+    places_raw = [
+        _redact_place_profile(
+            compute_place_profile(ds, pid, _ctx=ctx),
+            ds,
+            scrub,
+            redact_living,
+            living_ids=living_ids,
+        )
+        for pid in sorted(ds.places)
+    ]
 
     # Compute dynamic era slider bounds from dataset years (supports colonial 1600s trees!)
     all_years = [
@@ -1060,7 +1370,7 @@ def build_viewer_payload(
                 "individuals": len(ds.individuals),
                 "sources": len(ds.sources),
                 "relationships": len(ds.relationships),
-                "consanguineous_marriages": len(consanguineous_list),
+                "consanguineous_marriages": len(consanguineous_dicts),
                 "tracts": len(tracts_raw),
                 "places": len(places_raw),
             },
@@ -1069,7 +1379,7 @@ def build_viewer_payload(
         "individuals": individuals_out,
         "sources": sources_out,
         "relationships": relationships_out,
-        "consanguineous_marriages": [r.to_dict() for r in consanguineous_list],
+        "consanguineous_marriages": consanguineous_dicts,
         "tracts": tracts_raw,
         "places": places_raw,
         "layout": layout,
@@ -1081,11 +1391,14 @@ def _redact_place_profile(
     ds: Dataset,
     scrub: Any,
     redact_living: bool,
+    *,
+    living_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Redact living individuals inside a place profile dictionary."""
     if not redact_living:
         return profile
-    living_ids = {iid for iid, ind in ds.individuals.items() if ind.data.living}
+    if living_ids is None:
+        living_ids = {iid for iid, ind in ds.individuals.items() if ind.data.living}
     if profile.get("root_id") in living_ids:
         profile["root_name"] = "Living (Redacted)"
     for ind in profile.get("individuals", []):
@@ -1975,56 +2288,107 @@ function renderMarkdownSafe(mdText) {
 // Client-side kinship path solver (used in standalone static HTML mode)
 function computeKinshipClient(data, a, b) {
   const parents = {};
-  for (const r of data.relationships) {
+  const children = {};
+  let areMarried = false;
+  for (const r of (data.relationships || [])) {
     if (r.type === "parent_child" && !["adoptive", "step", "foster"].includes(r.subtype)) {
       (parents[r.person_2] ||= []).push(r.person_1);
+      (children[r.person_1] ||= []).push(r.person_2);
+    } else if (r.type === "marriage" && ((r.person_1 === a && r.person_2 === b) || (r.person_1 === b && r.person_2 === a))) {
+      areMarried = true;
     }
   }
-  function upwardPaths(start) {
-    const out = {};
-    const q = [[start]];
-    while (q.length) {
-      const path = q.shift();
-      const cur = path[path.length - 1];
-      (out[cur] ||= []).push(path);
-      if (path.length > 10) continue;
-      for (const p of (parents[cur] || [])) {
-        if (!path.includes(p)) q.push([...path, p]);
+  const maxDepth = 10;
+  function ancDist(start) {
+    const dist = { [start]: 0 };
+    const q = [[start, 0]];
+    let head = 0;
+    while (head < q.length) {
+      const [u, d] = q[head++];
+      const nd = d + 1;
+      for (const p of (parents[u] || [])) {
+        if (!(p in dist)) {
+          dist[p] = nd;
+          if (nd < maxDepth) q.push([p, nd]);
+        }
       }
     }
-    return out;
+    return dist;
   }
-  const pa = upwardPaths(a);
-  const pb = upwardPaths(b);
+  const da = ancDist(a);
+  const db = ancDist(b);
+  const common = new Set();
+  for (const k of Object.keys(da)) {
+    if (k in db) common.add(k);
+  }
   const paths = [];
-  for (const anc of Object.keys(pa)) {
-    if (!pb[anc]) continue;
-    for (const x of pa[anc]) {
-      const ix = new Set(x.slice(0, -1));
-      for (const y of pb[anc]) {
-        const iy = new Set(y.slice(0, -1));
-        let overlap = false;
-        for (const n of ix) if (iy.has(n)) { overlap = true; break; }
-        if (overlap) continue;
-        const m = x.length - 1, n = y.length - 1;
-        paths.push({
-          common_ancestor: anc,
-          common_ancestor_name: data.individuals[anc]?.primary_name || anc,
-          steps_a: m,
-          steps_b: n,
-          label: `${m}↑ / ${n}↑ via ${data.individuals[anc]?.primary_name || anc}`,
-          path_a: x,
-          path_b: y,
-          path_contribution: Math.pow(0.5, m + n),
-        });
+  if (common.size) {
+    function prunedPaths(start, distFromStart) {
+      const distToTarget = {};
+      const dq = [];
+      for (const t of common) { distToTarget[t] = 0; dq.push(t); }
+      let dHead = 0;
+      while (dHead < dq.length) {
+        const u = dq[dHead++];
+        const nd = distToTarget[u] + 1;
+        for (const c of (children[u] || [])) {
+          if ((c in distFromStart) && !(c in distToTarget) && distFromStart[c] + nd <= maxDepth) {
+            distToTarget[c] = nd;
+            dq.push(c);
+          }
+        }
+      }
+      if (!(start in distToTarget)) return {};
+      const out = {};
+      const pq = [[start]];
+      let pHead = 0;
+      while (pHead < pq.length) {
+        const path = pq[pHead++];
+        const cur = path[path.length - 1];
+        if (common.has(cur)) (out[cur] ||= []).push(path);
+        const plen = path.length - 1;
+        if (plen >= maxDepth) continue;
+        for (const p of (parents[cur] || [])) {
+          const dt = distToTarget[p];
+          if (dt !== undefined && plen + 1 + dt <= maxDepth && !path.includes(p)) {
+            pq.push([...path, p]);
+          }
+        }
+      }
+      return out;
+    }
+    const pa = prunedPaths(a, da);
+    const pb = prunedPaths(b, db);
+    for (const anc of common) {
+      const listA = pa[anc];
+      const listB = pb[anc];
+      if (!listA || !listB) continue;
+      const pbInt = listB.map(y => [y, new Set(y.slice(0, -1))]);
+      const ancName = data.individuals[anc]?.primary_name || anc;
+      for (const x of listA) {
+        const ix = new Set(x.slice(0, -1));
+        const m = x.length - 1;
+        for (const [y, iy] of pbInt) {
+          let overlap = false;
+          for (const node of ix) if (iy.has(node)) { overlap = true; break; }
+          if (overlap) continue;
+          const n = y.length - 1;
+          paths.push({
+            common_ancestor: anc,
+            common_ancestor_name: ancName,
+            steps_a: m,
+            steps_b: n,
+            label: `${m}↑ / ${n}↑ via ${ancName}`,
+            path_a: x,
+            path_b: y,
+            path_contribution: Math.pow(0.5, m + n),
+          });
+        }
       }
     }
+    paths.sort((u, v) => (u.steps_a + u.steps_b) - (v.steps_a + v.steps_b));
   }
-  paths.sort((u, v) => (u.steps_a + u.steps_b) - (v.steps_a + v.steps_b));
   const estR = paths.reduce((acc, p) => acc + p.path_contribution, 0);
-  const areMarried = data.relationships.some(
-    r => r.type === "marriage" && ((r.person_1 === a && r.person_2 === b) || (r.person_1 === b && r.person_2 === a))
-  );
   return {
     person_a: a,
     person_a_name: data.individuals[a]?.primary_name || a,
@@ -2045,6 +2409,27 @@ async function fetchKinship(a, b) {
     if (res.ok) return await res.json();
   }
   return computeKinshipClient(state.data, a, b);
+}
+
+let _consangMapCache = { data: null, map: null };
+function getConsangMap() {
+  if (_consangMapCache.data === state.data && _consangMapCache.map) return _consangMapCache.map;
+  const map = new Map();
+  for (const rep of (state.data?.consanguineous_marriages || [])) {
+    const key = rep.person_a <= rep.person_b ? `${rep.person_a}|${rep.person_b}` : `${rep.person_b}|${rep.person_a}`;
+    map.set(key, rep);
+  }
+  _consangMapCache = { data: state.data, map };
+  return map;
+}
+
+function getHubKinship(hub) {
+  if (!hub) return null;
+  if (hub.kinship) return hub.kinship;
+  if (!hub.consanguineous || !hub.parents || hub.parents.length !== 2) return null;
+  const [a, b] = hub.parents;
+  const key = a <= b ? `${a}|${b}` : `${b}|${a}`;
+  return getConsangMap().get(key) || null;
 }
 
 let _familyIndexCache = { data: null, idx: null };
@@ -2075,7 +2460,7 @@ function getFamilyIndex() {
       pushUnique(partnersOf, r.person_1, r.person_2);
       pushUnique(partnersOf, r.person_2, r.person_1);
       if (r.date) {
-        const key = [r.person_1, r.person_2].sort().join("|");
+        const key = r.person_1 <= r.person_2 ? `${r.person_1}|${r.person_2}` : `${r.person_2}|${r.person_1}`;
         marriageDates[key] = r.date;
       }
     } else if (r.type === "sibling") {
@@ -2100,10 +2485,13 @@ function getFamilyIndex() {
 
 function countAncestorsIn(iid, allowedSet, idx) {
   const seen = new Set();
-  const q = [...(idx.parentsOf[iid] || [])].filter(p => allowedSet.has(p));
-  for (const p of q) seen.add(p);
-  while (q.length) {
-    const cur = q.shift();
+  const q = [];
+  for (const p of (idx.parentsOf[iid] || [])) {
+    if (allowedSet.has(p) && !seen.has(p)) { seen.add(p); q.push(p); }
+  }
+  let head = 0;
+  while (head < q.length) {
+    const cur = q[head++];
     for (const p of (idx.parentsOf[cur] || [])) {
       if (allowedSet.has(p) && !seen.has(p)) {
         seen.add(p);
@@ -2119,15 +2507,15 @@ function getBaseVisibleIds() {
   let visible = new Set(Object.keys(inds).filter(id => state.showExcluded || inds[id].status !== "excluded"));
 
   if (state.selectedId && state.focusMode !== "all") {
-    const rels = state.data.relationships.filter(r => r.type === "parent_child");
+    const idx = getFamilyIndex();
+    const adj = state.focusMode === "ancestors" ? idx.parentsOf : idx.childrenOf;
     const keep = new Set([state.selectedId]);
     const queue = [state.selectedId];
-    while (queue.length) {
-      const cur = queue.shift();
-      for (const r of rels) {
-        const nxt = state.focusMode === "ancestors" ? (r.person_2 === cur ? r.person_1 : null)
-                  : (r.person_1 === cur ? r.person_2 : null);
-        if (nxt && visible.has(nxt) && !keep.has(nxt)) {
+    let head = 0;
+    while (head < queue.length) {
+      const cur = queue[head++];
+      for (const nxt of (adj[cur] || [])) {
+        if (visible.has(nxt) && !keep.has(nxt)) {
           keep.add(nxt);
           queue.push(nxt);
         }
@@ -2150,7 +2538,7 @@ function getDirectAncestors(baseVisible) {
   let focalForPedigree = data.meta?.focal_person_id;
   if (!focalForPedigree || !indsMap[focalForPedigree] || (baseVisible && !baseVisible.has(focalForPedigree))) {
     let bestId = null, bestGen = -Infinity, bestX = Infinity;
-    const pool = baseVisible ? [...baseVisible] : Object.keys(indsMap);
+    const pool = baseVisible ? baseVisible : Object.keys(indsMap);
     for (const iid of pool) {
       const p = serverNodes[iid];
       if (!p) continue;
@@ -2166,8 +2554,9 @@ function getDirectAncestors(baseVisible) {
   if (focalForPedigree) {
     direct.add(focalForPedigree);
     const dq = [focalForPedigree];
-    while (dq.length) {
-      const cur = dq.shift();
+    let head = 0;
+    while (head < dq.length) {
+      const cur = dq[head++];
       for (const p of (idx.parentsOf[cur] || [])) {
         if (!direct.has(p) && (!baseVisible || baseVisible.has(p))) {
           direct.add(p);
@@ -2204,20 +2593,18 @@ function getVisibleIds(baseVisibleOpt, directSetOpt) {
     if (visitedComp.has(id)) continue;
     const comp = [];
     const q = [id];
+    let head = 0;
     visitedComp.add(id);
-    while (q.length) {
-      const u = q.shift();
+    while (head < q.length) {
+      const u = q[head++];
       comp.push(u);
-      const nbs = [
-        ...(idx.parentsOf[u] || []),
-        ...(idx.childrenOf[u] || []),
-        ...(idx.partnersOf[u] || []),
-        ...(idx.siblingsOf[u] || []),
-      ];
-      for (const nb of nbs) {
-        if (baseVisible.has(nb) && !visitedComp.has(nb)) {
-          visitedComp.add(nb);
-          q.push(nb);
+      for (const adj of [idx.parentsOf[u], idx.childrenOf[u], idx.partnersOf[u], idx.siblingsOf[u]]) {
+        if (!adj) continue;
+        for (const nb of adj) {
+          if (baseVisible.has(nb) && !visitedComp.has(nb)) {
+            visitedComp.add(nb);
+            q.push(nb);
+          }
         }
       }
     }
@@ -2246,9 +2633,10 @@ function getVisibleIds(baseVisibleOpt, directSetOpt) {
     }
 
     const q = [anchor];
+    let head = 0;
     kept.add(anchor);
-    while (q.length) {
-      const u = q.shift();
+    while (head < q.length) {
+      const u = q[head++];
       // Always traverse to partners (spouses / co-parents)
       for (const s of (idx.partnersOf[u] || [])) {
         if (compSet.has(s) && !kept.has(s)) { kept.add(s); q.push(s); }
@@ -2316,11 +2704,72 @@ function generationLabelClient(delta) {
   return `${-delta - 2}× Great-Grandchildren (${delta})`;
 }
 
+function pairCrossDiffClient(a, b) {
+  const na = a.length, nb = b.length;
+  if (!na || !nb) return 0;
+  if (a[na - 1] < b[0]) return na * nb;
+  if (a[0] > b[nb - 1]) return -na * nb;
+  let lo = 0, hi = 0, diff = 0;
+  for (let idx = 0; idx < na; idx++) {
+    const x = a[idx];
+    while (lo < nb && b[lo] < x) lo++;
+    if (hi < lo) hi = lo;
+    while (hi < nb && b[hi] <= x) hi++;
+    diff += (nb - hi) - lo;
+  }
+  return diff;
+}
+
+function fastPairCostIntClient(groups, lxs2) {
+  let span2 = 0, maxR = 0, edgeCount = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const us = groups[i], lx2 = lxs2[i];
+    for (let j = 0; j < us.length; j++) {
+      const u2 = us[j];
+      const d = u2 - lx2;
+      span2 += d * d;
+      if (u2 + 1 > maxR) maxR = u2 + 1;
+      edgeCount++;
+    }
+  }
+  if (edgeCount <= 1 || maxR <= 1) return span2 * 0.0125;
+  const bit = new Int32Array(maxR + 1);
+  let crossings = 0, inserted = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const us = groups[i];
+    if (!us.length) continue;
+    for (let j = 0; j < us.length; j++) {
+      let idx = us[j] + 1, s = 0;
+      while (idx > 0) { s += bit[idx]; idx -= idx & -idx; }
+      crossings += inserted - s;
+    }
+    for (let j = 0; j < us.length; j++) {
+      let idx = us[j] + 1;
+      while (idx <= maxR) { bit[idx]++; idx += idx & -idx; }
+      inserted++;
+    }
+  }
+  return crossings * 100 + span2 * 0.0125;
+}
+
+let _clientLayoutCache = { data: null, key: null, layout: null };
+
 function computeClientLayout(visible) {
   const serverLayout = state.data.layout;
   const allCount = Object.keys(state.data.individuals || {}).length;
   if (!state.collapsedAncestors.size && !state.collapsedCollaterals.size && state.focusMode === "all" && visible.size === allCount) {
     return serverLayout;
+  }
+
+  const cacheKey = [
+    state.focusMode,
+    state.focusMode === "all" ? "" : (state.selectedId || ""),
+    state.showExcluded ? "1" : "0",
+    [...state.collapsedAncestors].sort().join(","),
+    [...state.collapsedCollaterals].sort().join(","),
+  ].join("::");
+  if (_clientLayoutCache.data === state.data && _clientLayoutCache.key === cacheKey && _clientLayoutCache.layout) {
+    return _clientLayoutCache.layout;
   }
 
   const cw = serverLayout.card_w || 216;
@@ -2333,10 +2782,11 @@ function computeClientLayout(visible) {
 
   const visIds = [...visible].sort();
   if (!visIds.length) {
-    return { nodes: {}, hubs: [], edges: [], generations: [], width: 800, height: 500, card_w: cw, card_h: ch };
+    const emptyLayout = { nodes: {}, hubs: [], edges: [], generations: [], width: 800, height: 500, card_w: cw, card_h: ch };
+    _clientLayoutCache = { data: state.data, key: cacheKey, layout: emptyLayout };
+    return emptyLayout;
   }
 
-  const inds = state.data.individuals;
   const idx = getFamilyIndex();
   const parentsOf = {};
   const childrenOf = {};
@@ -2377,9 +2827,11 @@ function computeClientLayout(visible) {
     const sameRowPartners = {};
     for (const u of layers[r]) {
       const married = spousesOf[u].filter(s => rowSet.has(s));
-      const other = partnersOf[u].filter(s => rowSet.has(s) && !married.includes(s));
+      const marriedSet = new Set(married);
+      const other = partnersOf[u].filter(s => rowSet.has(s) && !marriedSet.has(s));
       married.sort((a, b) => {
-        const ka = [u, a].sort().join("|"), kb = [u, b].sort().join("|");
+        const ka = u <= a ? `${u}|${a}` : `${a}|${u}`;
+        const kb = u <= b ? `${u}|${b}` : `${b}|${u}`;
         return (idx.marriageDates[ka] || "9999").localeCompare(idx.marriageDates[kb] || "9999") || serverX(a) - serverX(b);
       });
       sameRowPartners[u] = [...married, ...other];
@@ -2409,124 +2861,244 @@ function computeClientLayout(visible) {
     rowUnits[r] = units;
   }
 
-  // Barycenter sweeps
-  const nodeIndex = () => {
-    const pos = {};
-    for (const r of sortedRanks) {
-      let cur = 0;
-      for (const unit of rowUnits[r]) {
-        for (const id of unit) { pos[id] = cur; cur += 1; }
-        cur += 0.5;
-      }
+  // Barycenter sweeps using exact doubled integer positions (`pos2`)
+  const pos2 = {};
+  const updateRowPos2 = (r) => {
+    let cur2 = 0;
+    for (const unit of rowUnits[r]) {
+      for (const id of unit) { pos2[id] = cur2; cur2 += 2; }
+      cur2 += 1;
     }
-    return pos;
   };
+  for (const r of sortedRanks) updateRowPos2(r);
 
   for (let pass = 0; pass < 6; pass++) {
-    let pos = nodeIndex();
+    let snap = { ...pos2 };
     for (let i = 1; i < sortedRanks.length; i++) {
       const r = sortedRanks[i];
       const scored = rowUnits[r].map(unit => {
         if (unit.length === 2) {
           const [a, b] = unit;
-          const pa = parentsOf[a].filter(p => p in pos).map(p => pos[p]);
-          const pb = parentsOf[b].filter(p => p in pos).map(p => pos[p]);
+          const pa = parentsOf[a].filter(p => p in snap).map(p => snap[p]);
+          const pb = parentsOf[b].filter(p => p in snap).map(p => snap[p]);
           if (pa.length && pb.length && (pa.reduce((s, x) => s + x, 0) / pa.length) > (pb.reduce((s, x) => s + x, 0) / pb.length)) {
             unit = [b, a];
           }
         }
-        const allP = unit.flatMap(m => parentsOf[m].filter(p => p in pos).map(p => pos[p]));
+        const allP = unit.flatMap(m => parentsOf[m].filter(p => p in snap).map(p => snap[p]));
         const bary = allP.length ? allP.reduce((s, x) => s + x, 0) / allP.length
-                                 : unit.reduce((s, m) => s + pos[m], 0) / unit.length;
+                                 : unit.reduce((s, m) => s + snap[m], 0) / unit.length;
         return { bary, sx: Math.min(...unit.map(serverX)), id: unit[0], unit };
       });
       scored.sort((a, b) => a.bary - b.bary || a.sx - b.sx || a.id.localeCompare(b.id));
       rowUnits[r] = scored.map(s => s.unit);
+      updateRowPos2(r);
     }
-    pos = nodeIndex();
+    snap = { ...pos2 };
     for (let i = sortedRanks.length - 2; i >= 0; i--) {
       const r = sortedRanks[i];
       const scored = rowUnits[r].map(unit => {
-        const allC = unit.flatMap(m => childrenOf[m].filter(c => c in pos).map(c => pos[c]));
+        const allC = unit.flatMap(m => childrenOf[m].filter(c => c in snap).map(c => snap[c]));
         const bary = allC.length ? allC.reduce((s, x) => s + x, 0) / allC.length
-                                 : unit.reduce((s, m) => s + pos[m], 0) / unit.length;
+                                 : unit.reduce((s, m) => s + snap[m], 0) / unit.length;
         return { bary, sx: Math.min(...unit.map(serverX)), id: unit[0], unit };
       });
       scored.sort((a, b) => a.bary - b.bary || a.sx - b.sx || a.id.localeCompare(b.id));
       rowUnits[r] = scored.map(s => s.unit);
+      updateRowPos2(r);
     }
   }
 
   // Exact crossing-count + span 2-opt optimization (matches server layout)
-  const rowCost = (r, posMap) => {
-    const localPos = {};
-    let cur = 0;
-    for (const unit of rowUnits[r]) {
-      for (const id of unit) { localPos[id] = cur; cur += 1; }
-      cur += 0.5;
-    }
-    const pairCost = (pairs) => {
-      const m = pairs.length;
-      if (m <= 1) return pairs.reduce((s, [u, v]) => s + (u - v) * (u - v), 0) * 0.05;
-      let crossings = 0, span = 0;
-      for (let i = 0; i < m; i++) {
-        const [u1, v1] = pairs[i];
-        span += (u1 - v1) * (u1 - v1);
-        for (let j = i + 1; j < m; j++) {
-          const [u2, v2] = pairs[j];
-          if ((u1 - u2) * (v1 - v2) < 0) crossings++;
-        }
+  const rowSets = {};
+  const hasIntraRow = {};
+  for (const r of sortedRanks) {
+    const rs = new Set(layers[r]);
+    rowSets[r] = rs;
+    let intra = false;
+    for (const u of rs) {
+      if ((parentsOf[u] || []).some(p => rs.has(p)) || (childrenOf[u] || []).some(c => rs.has(c))) {
+        intra = true;
+        break;
       }
-      return crossings * 100 + span * 0.05;
-    };
-    const up = [], down = [];
+    }
+    hasIntraRow[r] = intra;
+  }
+  const simpleBetween = {};
+  for (let ir = 1; ir < sortedRanks.length; ir++) {
+    const ra = sortedRanks[ir - 1], rb = sortedRanks[ir];
+    const sa = rowSets[ra], sb = rowSets[rb];
+    let ok = true;
+    for (const u of sa) if ((childrenOf[u] || []).some(c => !sb.has(c))) { ok = false; break; }
+    if (ok) for (const u of sb) if ((parentsOf[u] || []).some(p => !sa.has(p))) { ok = false; break; }
+    simpleBetween[`${ra}|${rb}`] = ok;
+  }
+
+  const rowCostUp = (r, pm2) => {
+    const groupsUp = [], lxs2 = [];
+    let cur2 = 0;
     for (const unit of rowUnits[r]) {
       for (const id of unit) {
-        const lx = localPos[id];
-        for (const p of (parentsOf[id] || [])) if (p in posMap) up.push([posMap[p], lx]);
-        for (const c of (childrenOf[id] || [])) if (c in posMap) down.push([lx, posMap[c]]);
+        lxs2.push(cur2);
+        groupsUp.push((parentsOf[id] || []).filter(p => p in pm2).map(p => pm2[p]));
+        cur2 += 2;
       }
+      cur2 += 1;
     }
-    return pairCost(up) + pairCost(down);
+    return fastPairCostIntClient(groupsUp, lxs2);
   };
+  const rowCostDown = (r, pm2) => {
+    const groupsDn = [], lxs2 = [];
+    let cur2 = 0;
+    for (const unit of rowUnits[r]) {
+      for (const id of unit) {
+        lxs2.push(cur2);
+        groupsDn.push((childrenOf[id] || []).filter(c => c in pm2).map(c => pm2[c]));
+        cur2 += 2;
+      }
+      cur2 += 1;
+    }
+    return fastPairCostIntClient(groupsDn, lxs2);
+  };
+  const rowCost = (r, pm2) => rowCostUp(r, pm2) + rowCostDown(r, pm2);
+
+  const sweepOrder = [...sortedRanks, ...[...sortedRanks].reverse()];
   for (let round = 0; round < 5; round++) {
     let improved = false;
-    const sweepOrder = [...sortedRanks, ...[...sortedRanks].reverse()];
     for (const r of sweepOrder) {
       const units = rowUnits[r];
       const k = units.length;
       if (!k) continue;
-      const posMap = nodeIndex();
-      let best = rowCost(r, posMap);
+
+      if (hasIntraRow[r]) {
+        const snapPm = { ...pos2 };
+        let best = rowCost(r, snapPm);
+        for (let i = 0; i < k; i++) {
+          if (units[i].length === 2) {
+            units[i] = [units[i][1], units[i][0]];
+            const c = rowCost(r, snapPm);
+            if (c + 1e-6 < best) { best = c; improved = true; }
+            else units[i] = [units[i][1], units[i][0]];
+          }
+        }
+        const maxD = k <= 30 ? k : 14;
+        for (let i = 0; i < k; i++) {
+          for (let j = i + 1; j < Math.min(k, i + maxD + 1); j++) {
+            [units[i], units[j]] = [units[j], units[i]];
+            const c = rowCost(r, snapPm);
+            if (c + 1e-6 < best) { best = c; improved = true; }
+            else [units[i], units[j]] = [units[j], units[i]];
+          }
+        }
+        updateRowPos2(r);
+        continue;
+      }
+
+      const descs = [];
+      const x0_2 = new Int32Array(k);
+      let cur2 = 0;
+      for (let uid = 0; uid < k; uid++) {
+        const u = units[uid];
+        x0_2[uid] = cur2;
+        const upXs2 = [], dnXs2 = [];
+        let sumUd2 = 0;
+        for (let d = 0; d < u.length; d++) {
+          const m = u[d], d2 = 2 * d;
+          for (const p of (parentsOf[m] || [])) if (p in pos2) { upXs2.push(pos2[p]); sumUd2 += pos2[p] - d2; }
+          for (const c of (childrenOf[m] || [])) if (c in pos2) { dnXs2.push(pos2[c]); sumUd2 += pos2[c] - d2; }
+        }
+        upXs2.sort((a, b) => a - b);
+        dnXs2.sort((a, b) => a - b);
+        descs.push({ uid, upXs2, dnXs2, deg: upXs2.length + dnXs2.length, sumUd2, w: u.length });
+        cur2 += 2 * u.length + 1;
+      }
+
       for (let i = 0; i < k; i++) {
-        if (units[i].length === 2) {
-          units[i] = [units[i][1], units[i][0]];
-          const c = rowCost(r, posMap);
-          if (c + 1e-6 < best) { best = c; improved = true; }
-          else units[i] = [units[i][1], units[i][0]];
+        const u = units[i];
+        if (u.length === 2) {
+          const [a, b] = u;
+          const upA = (parentsOf[a] || []).filter(p => p in pos2).map(p => pos2[p]).sort((x, y) => x - y);
+          const upB = (parentsOf[b] || []).filter(p => p in pos2).map(p => pos2[p]).sort((x, y) => x - y);
+          const dnA = (childrenOf[a] || []).filter(c => c in pos2).map(c => pos2[c]).sort((x, y) => x - y);
+          const dnB = (childrenOf[b] || []).filter(c => c in pos2).map(c => pos2[c]).sort((x, y) => x - y);
+          const degA = upA.length + dnA.length, degB = upB.length + dnB.length;
+          let sumA = 0, sumB = 0;
+          for (const v of upA) sumA += v;
+          for (const v of dnA) sumA += v;
+          for (const v of upB) sumB += v;
+          for (const v of dnB) sumB += v;
+          const dcross = pairCrossDiffClient(upA, upB) + pairCrossDiffClient(dnA, dnB);
+          const dspan2 = 4 * (x0_2[i] + 1) * (degA - degB) - 4 * (sumA - sumB);
+          if (dcross * 100 + dspan2 * 0.0125 < -1e-6) {
+            units[i] = [b, a];
+            descs[i].sumUd2 = sumB + sumA - 2 * degA;
+            improved = true;
+          }
         }
       }
+
+      const dCache = Array.from({ length: k }, () => new Map());
+      const getCdiff = (da, db) => {
+        const rowMap = dCache[da.uid];
+        let val = rowMap.get(db.uid);
+        if (val === undefined) {
+          val = pairCrossDiffClient(da.upXs2, db.upXs2) + pairCrossDiffClient(da.dnXs2, db.dnXs2);
+          rowMap.set(db.uid, val);
+          dCache[db.uid].set(da.uid, -val);
+        }
+        return val;
+      };
+
       const maxD = k <= 30 ? k : 14;
       for (let i = 0; i < k; i++) {
+        let di = descs[i];
+        let sumIt = 0;
         for (let j = i + 1; j < Math.min(k, i + maxD + 1); j++) {
-          [units[i], units[j]] = [units[j], units[i]];
-          const c = rowCost(r, posMap);
-          if (c + 1e-6 < best) { best = c; improved = true; }
-          else [units[i], units[j]] = [units[j], units[i]];
+          const dj = descs[j];
+          if (j > i + 1) sumIt += getCdiff(di, descs[j - 1]);
+          let dcross = getCdiff(di, dj) + sumIt;
+          const shift2 = 2 * (dj.w - di.w);
+          let dspan2 = 0;
+          if (shift2 === 0) {
+            for (let t = i + 1; t < j; t++) dcross += getCdiff(descs[t], dj);
+          } else {
+            for (let t = i + 1; t < j; t++) {
+              const dt = descs[t];
+              dcross += getCdiff(dt, dj);
+              dspan2 += shift2 * ((2 * x0_2[t] + shift2) * dt.deg - 2 * dt.sumUd2);
+            }
+          }
+          const xi = x0_2[i], xj = x0_2[j], xiNew = xj + shift2;
+          dspan2 += (xiNew - xi) * ((xiNew + xi) * di.deg - 2 * di.sumUd2);
+          dspan2 += (xi - xj) * ((xi + xj) * dj.deg - 2 * dj.sumUd2);
+          if (dcross * 100 + dspan2 * 0.0125 < -1e-6) {
+            [units[i], units[j]] = [units[j], units[i]];
+            [descs[i], descs[j]] = [descs[j], descs[i]];
+            if (shift2 !== 0) for (let t = i + 1; t <= j; t++) x0_2[t] += shift2;
+            di = descs[i];
+            sumIt = 0;
+            for (let t = i + 1; t < j; t++) sumIt += getCdiff(di, descs[t]);
+            improved = true;
+          }
         }
       }
+      updateRowPos2(r);
     }
-    // Coupled 2-layer move: flip 2-person couple [a, b] in row r, swap their two parent units in row r-1,
-    // and let unconstrained units in row r-2 re-align by child barycenter before measuring total crossings
+
+    // Coupled 2-layer move
     for (let ir = 1; ir < sortedRanks.length; ir++) {
       const r = sortedRanks[ir], rPrev = sortedRanks[ir - 1];
       const rPrev2 = ir >= 2 ? sortedRanks[ir - 2] : null;
+      const sPrevR = !!simpleBetween[`${rPrev}|${r}`];
+      const sP2Prev = rPrev2 !== null ? !!simpleBetween[`${rPrev2}|${rPrev}`] : false;
       const buildNodeToPrevU = () => {
         const m = {};
         rowUnits[rPrev].forEach((u, ui) => { for (const x of u) m[x] = ui; });
         return m;
       };
       let nodeToPrevU = buildNodeToPrevU();
+      let cachedBefore = null;
+
       for (let i = 0; i < rowUnits[r].length; i++) {
         const unit = rowUnits[r][i];
         if (unit.length !== 2) continue;
@@ -2537,39 +3109,78 @@ function computeClientLayout(visible) {
         const ua = [...uaSet][0], ub = [...ubSet][0];
         if (ua === ub) continue;
 
-        const savedR = rowUnits[r].map(u => [...u]);
-        const savedPrev = rowUnits[rPrev].map(u => [...u]);
-        const savedPrev2 = rPrev2 !== null ? rowUnits[rPrev2].map(u => [...u]) : null;
+        if (!cachedBefore) {
+          const cPU = rowCostUp(rPrev, pos2);
+          const cPD = rowCostDown(rPrev, pos2);
+          const cRU = sPrevR ? cPD : rowCostUp(r, pos2);
+          const cRD = rowCostDown(r, pos2);
+          let c2U = 0, c2D = 0;
+          if (rPrev2 !== null) {
+            c2U = rowCostUp(rPrev2, pos2);
+            c2D = sP2Prev ? cPU : rowCostDown(rPrev2, pos2);
+          }
+          cachedBefore = [cPU, cPD, cRU, cRD, c2U, c2D];
+        }
+        const costBefore = cachedBefore[0] + cachedBefore[1] + cachedBefore[2] + cachedBefore[3] + cachedBefore[4] + cachedBefore[5];
 
-        const posBefore = nodeIndex();
-        let costBefore = rowCost(rPrev, posBefore) + rowCost(r, posBefore);
-        if (rPrev2 !== null) costBefore += rowCost(rPrev2, posBefore);
+        let cRD_a = null;
+        if (!hasIntraRow[r]) {
+          const dnA = (childrenOf[a] || []).filter(c => c in pos2).map(c => pos2[c]).sort((x, y) => x - y);
+          const dnB = (childrenOf[b] || []).filter(c => c in pos2).map(c => pos2[c]).sort((x, y) => x - y);
+          const sumA = dnA.reduce((s, v) => s + v, 0), sumB = dnB.reduce((s, v) => s + v, 0);
+          const dRD = pairCrossDiffClient(dnA, dnB) * 100 + (4 * (pos2[a] + 1) * (dnA.length - dnB.length) - 4 * (sumA - sumB)) * 0.0125;
+          cRD_a = cachedBefore[3] + dRD;
+        }
 
         rowUnits[r][i] = [b, a];
         [rowUnits[rPrev][ua], rowUnits[rPrev][ub]] = [rowUnits[rPrev][ub], rowUnits[rPrev][ua]];
+        updateRowPos2(r);
+        updateRowPos2(rPrev);
+
+        let prev2Changed = false, savedPrev2 = null;
         if (rPrev2 !== null) {
-          const posMid = nodeIndex();
           const scoredP2 = rowUnits[rPrev2].map(u2 => {
-            const cs = u2.flatMap(m => (childrenOf[m] || []).filter(c => c in posMid).map(c => posMid[c]));
+            const cs = u2.flatMap(m => (childrenOf[m] || []).filter(c => c in pos2).map(c => pos2[c]));
             const bary = cs.length ? cs.reduce((s, x) => s + x, 0) / cs.length
-                                   : u2.reduce((s, m) => s + posMid[m], 0) / u2.length;
+                                   : u2.reduce((s, m) => s + pos2[m], 0) / u2.length;
             return { bary, sx: Math.min(...u2.map(serverX)), id: u2[0], unit: u2 };
           });
           scoredP2.sort((x, y) => x.bary - y.bary || x.sx - y.sx || x.id.localeCompare(y.id));
-          rowUnits[rPrev2] = scoredP2.map(s => s.unit);
+          const newP2 = scoredP2.map(s => s.unit);
+          for (let q = 0; q < newP2.length; q++) {
+            if (newP2[q] !== rowUnits[rPrev2][q]) { prev2Changed = true; break; }
+          }
+          if (prev2Changed) {
+            savedPrev2 = rowUnits[rPrev2];
+            rowUnits[rPrev2] = newP2;
+            updateRowPos2(rPrev2);
+          }
         }
 
-        const posAfter = nodeIndex();
-        let costAfter = rowCost(rPrev, posAfter) + rowCost(r, posAfter);
-        if (rPrev2 !== null) costAfter += rowCost(rPrev2, posAfter);
+        const cPU_a = rowCostUp(rPrev, pos2);
+        const cPD_a = rowCostDown(rPrev, pos2);
+        const cRU_a = sPrevR ? cPD_a : rowCostUp(r, pos2);
+        if (cRD_a === null) cRD_a = rowCostDown(r, pos2);
+        let c2U_a = 0, c2D_a = 0;
+        if (rPrev2 !== null) {
+          c2U_a = prev2Changed ? rowCostUp(rPrev2, pos2) : cachedBefore[4];
+          c2D_a = sP2Prev ? cPU_a : rowCostDown(rPrev2, pos2);
+        }
+        const costAfter = cPU_a + cPD_a + cRU_a + cRD_a + c2U_a + c2D_a;
 
         if (costAfter + 1e-6 < costBefore) {
           improved = true;
+          cachedBefore = [cPU_a, cPD_a, cRU_a, cRD_a, c2U_a, c2D_a];
           nodeToPrevU = buildNodeToPrevU();
         } else {
-          rowUnits[r] = savedR;
-          rowUnits[rPrev] = savedPrev;
-          if (rPrev2 !== null && savedPrev2 !== null) rowUnits[rPrev2] = savedPrev2;
+          rowUnits[r][i] = [a, b];
+          [rowUnits[rPrev][ua], rowUnits[rPrev][ub]] = [rowUnits[rPrev][ub], rowUnits[rPrev][ua]];
+          updateRowPos2(r);
+          updateRowPos2(rPrev);
+          if (prev2Changed && savedPrev2 !== null) {
+            rowUnits[rPrev2] = savedPrev2;
+            updateRowPos2(rPrev2);
+          }
         }
       }
     }
@@ -2717,26 +3328,48 @@ function computeClientLayout(visible) {
   for (const pos of Object.values(nodesPos)) {
     (rowIntervals[pos.generation] ||= []).push([pos.x - cw / 2 - 10, pos.x + cw / 2 + 10]);
   }
+  const clearCandsCache = new Map();
   const findClearRouteX = (gStart, gEnd, prefX) => {
     if (gEnd - gStart <= 1) return null;
-    const blocked = [];
-    for (let g = gStart + 1; g < gEnd; g++) blocked.push(...(rowIntervals[g] || []));
-    if (!blocked.length) return null;
-    blocked.sort((a, b) => a[0] - b[0]);
-    const merged = [blocked[0].slice()];
-    for (let i = 1; i < blocked.length; i++) {
-      const prev = merged[merged.length - 1];
-      if (blocked[i][0] <= prev[1]) prev[1] = Math.max(prev[1], blocked[i][1]);
-      else merged.push(blocked[i].slice());
+    const cKey = `${gStart}|${gEnd}`;
+    let cands = clearCandsCache.get(cKey);
+    if (!cands) {
+      const blocked = [];
+      for (let g = gStart + 1; g < gEnd; g++) {
+        const ivs = rowIntervals[g];
+        if (ivs) for (const iv of ivs) blocked.push(iv);
+      }
+      if (!blocked.length) {
+        clearCandsCache.set(cKey, []);
+        return null;
+      }
+      blocked.sort((a, b) => a[0] - b[0]);
+      const merged = [blocked[0].slice()];
+      for (let i = 1; i < blocked.length; i++) {
+        const prev = merged[merged.length - 1];
+        if (blocked[i][0] <= prev[1]) prev[1] = Math.max(prev[1], blocked[i][1]);
+        else merged.push(blocked[i].slice());
+      }
+      cands = [merged[0][0] - 18];
+      for (let i = 0; i < merged.length - 1; i++) {
+        if (merged[i + 1][0] - merged[i][1] >= 12) cands.push((merged[i][1] + merged[i + 1][0]) / 2);
+      }
+      cands.push(merged[merged.length - 1][1] + 18);
+      clearCandsCache.set(cKey, cands);
     }
-    const cands = [merged[0][0] - 18, merged[merged.length - 1][1] + 18];
-    for (let i = 0; i < merged.length - 1; i++) {
-      if (merged[i + 1][0] - merged[i][1] >= 12) cands.push((merged[i][1] + merged[i + 1][0]) / 2);
+    if (!cands.length) return null;
+    let lo = 0, hi = cands.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cands[mid] < prefX) lo = mid + 1;
+      else hi = mid;
     }
-    let best = cands[0], bestD = Math.abs(cands[0] - prefX);
-    for (const cx of cands) {
-      const d = Math.abs(cx - prefX);
-      if (d < bestD) { bestD = d; best = cx; }
+    let best;
+    if (lo === 0) best = cands[0];
+    else if (lo === cands.length) best = cands[cands.length - 1];
+    else {
+      const left = cands[lo - 1], right = cands[lo];
+      best = Math.abs(left - prefX) <= Math.abs(right - prefX) ? left : right;
     }
     return Math.round(best * 10) / 10;
   };
@@ -2762,7 +3395,7 @@ function computeClientLayout(visible) {
     return { ...e, route_x: rx, bot_bus_y: Math.round((cPos.y - ch / 2 - 24) * 10) / 10 };
   });
 
-  return {
+  const computedLayout = {
     nodes: nodesPos,
     hubs,
     edges,
@@ -2772,6 +3405,8 @@ function computeClientLayout(visible) {
     card_w: cw,
     card_h: ch,
   };
+  _clientLayoutCache = { data: state.data, key: cacheKey, layout: computedLayout };
+  return computedLayout;
 }
 
 function roundedOrthogonalPath(x1, y1, x2, y2, busY) {
@@ -2801,7 +3436,17 @@ let _hoverLeaveTimer = null;
 let _hoverAlignTimer = null;
 let _rowAnimFrame = null;
 const HOVER_ALIGN_DELAY_MS = 1800;
-const _renderedRefs = { nodes: new Map(), hubs: new Map(), edges: [], visibleHubs: new Map(), genLabels: [] };
+const _renderedRefs = {
+  nodes: new Map(),
+  hubs: new Map(),
+  edges: [],
+  visibleHubs: new Map(),
+  genLabels: [],
+  hubsByNode: new Map(),
+  edgesByNode: new Map(),
+  edgesByHub: new Map(),
+  activeHover: [],
+};
 
 function getRowOffset(gen) {
   return state.rowOffsets[gen] || 0;
@@ -2846,14 +3491,14 @@ function roundedMultiGenPath(x1, y1, x2, y2, topBusY, routeX, botBusY) {
   ].join(" ");
 }
 
-function computeEdgePath(layout, edge, visibleHubs) {
+function computeEdgePath(layout, edge, visibleHubs, hubPosMap = null) {
   const cw = layout.card_w;
   const ch = layout.card_h;
   if (edge.kind === "spouse_to_hub") {
     const p = getVisualNodePos(layout, edge.from);
     const h = visibleHubs.get(edge.to);
     if (!p || !h) return null;
-    const hp = getVisualHubPos(layout, h);
+    const hp = (hubPosMap && hubPosMap.get(h.id)) || getVisualHubPos(layout, h);
     if (h.inline) {
       const x1 = p.x < hp.x ? p.x + cw / 2 : p.x - cw / 2;
       return `M ${x1} ${p.y} L ${hp.x} ${hp.y}`;
@@ -2866,7 +3511,7 @@ function computeEdgePath(layout, edge, visibleHubs) {
     const h = visibleHubs.get(edge.from);
     const c = getVisualNodePos(layout, edge.to);
     if (!h || !c) return null;
-    const hp = getVisualHubPos(layout, h);
+    const hp = (hubPosMap && hubPosMap.get(h.id)) || getVisualHubPos(layout, h);
     if (typeof edge.route_x === "number" && typeof edge.bot_bus_y === "number") {
       const parentGen = h.parents?.length ? Math.max(...h.parents.map(p => layout.nodes[p]?.generation ?? 0)) : 0;
       const topBusY = typeof h.bus_y === "number" ? h.bus_y : hp.y + ch / 2 + 44;
@@ -2894,14 +3539,16 @@ function applyRowOffsetsToDom() {
     const vp = getVisualNodePos(layout, iid);
     if (vp) elNode.setAttribute("transform", `translate(${vp.x - cw / 2}, ${vp.y - ch / 2})`);
   }
+  const hubPosMap = new Map();
   for (const [hid, elHub] of _renderedRefs.hubs.entries()) {
     const h = _renderedRefs.visibleHubs.get(hid);
     if (!h) continue;
     const hp = getVisualHubPos(layout, h);
+    hubPosMap.set(hid, hp);
     elHub.setAttribute("transform", `translate(${hp.x},${hp.y})`);
   }
   for (const { edge, el: elEdge } of _renderedRefs.edges) {
-    const dStr = computeEdgePath(layout, edge, _renderedRefs.visibleHubs);
+    const dStr = computeEdgePath(layout, edge, _renderedRefs.visibleHubs, hubPosMap);
     if (dStr) elEdge.setAttribute("d", dStr);
   }
 }
@@ -3025,14 +3672,17 @@ function alignParentsOverNode(iid) {
   scheduleSaveViewerState();
 }
 
+function _resetActiveHover() {
+  for (const elem of _renderedRefs.activeHover) elem.classList.remove("hover-focus");
+  _renderedRefs.activeHover.length = 0;
+}
+
 function clearHoverFocusImmediate() {
   cancelHoverAlignTimer();
   const svg = document.getElementById("graph");
   if (!svg) return;
   svg.classList.remove("hover-focus-active");
-  for (const elNode of _renderedRefs.nodes.values()) elNode.classList.remove("hover-focus");
-  for (const elHub of _renderedRefs.hubs.values()) elHub.classList.remove("hover-focus");
-  for (const item of _renderedRefs.edges) item.el.classList.remove("hover-focus");
+  _resetActiveHover();
 }
 
 function scheduleClearHoverFocus() {
@@ -3044,6 +3694,7 @@ function scheduleClearHoverFocus() {
 function applyHoverFocusForNode(iid, scheduleAlign = false) {
   clearTimeout(_hoverLeaveTimer);
   cancelHoverAlignTimer();
+  _resetActiveHover();
   const idx = getFamilyIndex();
   const focusNodes = new Set([
     iid,
@@ -3051,29 +3702,37 @@ function applyHoverFocusForNode(iid, scheduleAlign = false) {
     ...(idx.childrenOf[iid] || []),
     ...(idx.partnersOf[iid] || []),
   ]);
-  const focusHubs = new Set();
-  const layout = state.activeLayout || state.data.layout;
-  for (const h of (layout.hubs || [])) {
-    if (h.parents.includes(iid) || h.children.includes(iid)) focusHubs.add(h.id);
-  }
+  const focusHubs = _renderedRefs.hubsByNode.get(iid) || new Set();
   const svg = document.getElementById("graph");
   svg.classList.add("hover-focus-active");
-  for (const [id, elNode] of _renderedRefs.nodes.entries()) {
-    elNode.classList.toggle("hover-focus", focusNodes.has(id));
-  }
-  for (const [hid, elHub] of _renderedRefs.hubs.entries()) {
-    elHub.classList.toggle("hover-focus", focusHubs.has(hid));
-  }
-  for (const { edge, el: elEdge } of _renderedRefs.edges) {
-    let hit = false;
-    if (edge.kind === "spouse_to_hub") {
-      hit = focusHubs.has(edge.to) && focusNodes.has(edge.from);
-    } else if (edge.kind === "hub_to_child") {
-      hit = focusHubs.has(edge.from) && (edge.to === iid || (edge.parents || []).includes(iid));
-    } else {
-      hit = edge.from === iid || edge.to === iid;
+  for (const id of focusNodes) {
+    const elNode = _renderedRefs.nodes.get(id);
+    if (elNode) {
+      elNode.classList.add("hover-focus");
+      _renderedRefs.activeHover.push(elNode);
     }
-    elEdge.classList.toggle("hover-focus", hit);
+  }
+  for (const hid of focusHubs) {
+    const elHub = _renderedRefs.hubs.get(hid);
+    if (elHub) {
+      elHub.classList.add("hover-focus");
+      _renderedRefs.activeHover.push(elHub);
+    }
+    for (const item of (_renderedRefs.edgesByHub.get(hid) || [])) {
+      const e = item.edge;
+      const hit = (e.kind === "spouse_to_hub" && focusNodes.has(e.from))
+               || (e.kind === "hub_to_child" && (e.to === iid || (e.parents || []).includes(iid)));
+      if (hit) {
+        item.el.classList.add("hover-focus");
+        _renderedRefs.activeHover.push(item.el);
+      }
+    }
+  }
+  for (const item of (_renderedRefs.edgesByNode.get(iid) || [])) {
+    if (item.edge.kind !== "spouse_to_hub" && item.edge.kind !== "hub_to_child") {
+      item.el.classList.add("hover-focus");
+      _renderedRefs.activeHover.push(item.el);
+    }
   }
   if (scheduleAlign) {
     _hoverAlignTimer = setTimeout(() => {
@@ -3086,20 +3745,25 @@ function applyHoverFocusForNode(iid, scheduleAlign = false) {
 function applyHoverFocusForHub(hub) {
   clearTimeout(_hoverLeaveTimer);
   cancelHoverAlignTimer();
+  _resetActiveHover();
   const focusNodes = new Set([...hub.parents, ...hub.children]);
-  const focusHubs = new Set([hub.id]);
   const svg = document.getElementById("graph");
   svg.classList.add("hover-focus-active");
-  for (const [id, elNode] of _renderedRefs.nodes.entries()) {
-    elNode.classList.toggle("hover-focus", focusNodes.has(id));
+  for (const id of focusNodes) {
+    const elNode = _renderedRefs.nodes.get(id);
+    if (elNode) {
+      elNode.classList.add("hover-focus");
+      _renderedRefs.activeHover.push(elNode);
+    }
   }
-  for (const [hid, elHub] of _renderedRefs.hubs.entries()) {
-    elHub.classList.toggle("hover-focus", focusHubs.has(hid));
+  const elHub = _renderedRefs.hubs.get(hub.id);
+  if (elHub) {
+    elHub.classList.add("hover-focus");
+    _renderedRefs.activeHover.push(elHub);
   }
-  for (const { edge, el: elEdge } of _renderedRefs.edges) {
-    const hit = (edge.kind === "spouse_to_hub" && edge.to === hub.id)
-             || (edge.kind === "hub_to_child" && edge.from === hub.id);
-    elEdge.classList.toggle("hover-focus", hit);
+  for (const item of (_renderedRefs.edgesByHub.get(hub.id) || [])) {
+    item.el.classList.add("hover-focus");
+    _renderedRefs.activeHover.push(item.el);
   }
 }
 
@@ -3167,26 +3831,47 @@ function collapseAllCollaterals() {
   scheduleSaveViewerState();
 }
 
-function getSearchMatches() {
-  const q = state.searchQuery.trim().toLowerCase();
-  if (!q) return null;
-  const matches = new Set();
-  for (const [id, ind] of Object.entries(state.data.individuals)) {
-    const hay = [
+let _searchIndexCache = { data: null, indEntries: null, srcEntries: null };
+
+function getSearchIndex() {
+  if (_searchIndexCache.data === state.data && _searchIndexCache.indEntries) return _searchIndexCache;
+  const indEntries = [];
+  for (const [id, ind] of Object.entries(state.data.individuals || {})) {
+    const parts = [
       id,
-      ind.primary_name,
+      ind.primary_name || "",
       ...(ind.name_variants || []),
       ind.birth?.place || "",
       ind.death?.place || "",
-      ...(ind.events || []).map(e => `${e.place || ""} ${e.tract || ""} ${e.description || ""} ${e.suggested_label || ""}`),
-      ind.body_markdown || "",
-    ].join(" ").toLowerCase();
+    ];
+    for (const e of (ind.events || [])) {
+      parts.push(e.place || "", e.tract || "", e.description || "", e.suggested_label || "");
+    }
+    parts.push(ind.body_markdown || "");
+    indEntries.push([id, parts.join(" ").toLowerCase()]);
+  }
+  const srcEntries = [];
+  for (const src of Object.values(state.data.sources || {})) {
+    const cited = src.individuals_cited || [];
+    if (!cited.length) continue;
+    const hay = `${src.id} ${src.title} ${src.jurisdiction || ""} ${src.body_markdown || ""}`.toLowerCase();
+    srcEntries.push([hay, cited]);
+  }
+  _searchIndexCache = { data: state.data, indEntries, srcEntries };
+  return _searchIndexCache;
+}
+
+function getSearchMatches() {
+  const q = state.searchQuery.trim().toLowerCase();
+  if (!q) return null;
+  const { indEntries, srcEntries } = getSearchIndex();
+  const matches = new Set();
+  for (const [id, hay] of indEntries) {
     if (hay.includes(q)) matches.add(id);
   }
-  for (const src of Object.values(state.data.sources)) {
-    const hay = `${src.id} ${src.title} ${src.jurisdiction || ""} ${src.body_markdown || ""}`.toLowerCase();
+  for (const [hay, cited] of srcEntries) {
     if (hay.includes(q)) {
-      for (const iid of (src.individuals_cited || [])) matches.add(iid);
+      for (const iid of cited) matches.add(iid);
     }
   }
   return matches;
@@ -3267,6 +3952,10 @@ function renderGraph({ recomputeAlignments = false } = {}) {
   _renderedRefs.hubs.clear();
   _renderedRefs.edges = [];
   _renderedRefs.genLabels = [];
+  _renderedRefs.hubsByNode.clear();
+  _renderedRefs.edgesByNode.clear();
+  _renderedRefs.edgesByHub.clear();
+  _renderedRefs.activeHover = [];
 
   const layerBands = document.getElementById("layer-bands");
   const layerGenLabels = document.getElementById("layer-gen-labels");
@@ -3279,12 +3968,18 @@ function renderGraph({ recomputeAlignments = false } = {}) {
   layerHubs.replaceChildren();
   layerNodes.replaceChildren();
 
+  const fragBands = document.createDocumentFragment();
+  const fragGenLabels = document.createDocumentFragment();
+  const fragEdges = document.createDocumentFragment();
+  const fragHubs = document.createDocumentFragment();
+  const fragNodes = document.createDocumentFragment();
+
   const cw = layout.card_w;
   const ch = layout.card_h;
 
   // Subtle generation row guide lines (pan/zoom with graph) + sticky left-edge generation label pills
   for (const gMeta of (layout.generations || [])) {
-    layerBands.appendChild(svgEl("line", {
+    fragBands.appendChild(svgEl("line", {
       class: "gen-band-line",
       x1: -2000,
       y1: gMeta.y,
@@ -3299,10 +3994,12 @@ function renderGraph({ recomputeAlignments = false } = {}) {
       const lbl = svgEl("text", { class: "gen-band-label", x: 8, y: 4 });
       lbl.textContent = gMeta.label;
       gLbl.appendChild(lbl);
-      layerGenLabels.appendChild(gLbl);
+      fragGenLabels.appendChild(gLbl);
       _renderedRefs.genLabels.push({ y: gMeta.y, el: gLbl });
     }
   }
+  layerBands.appendChild(fragBands);
+  if (layerGenLabels) layerGenLabels.appendChild(fragGenLabels);
   updateStickyGenLabels();
 
   // Map hubKey -> full baseVisible children list from server layout (so collapsed hubs still know their collateral count)
@@ -3322,6 +4019,21 @@ function renderGraph({ recomputeAlignments = false } = {}) {
   _renderedRefs.visibleHubs = visibleHubs;
   if (recomputeAlignments) {
     state.rowOffsets = computeOffsetsFromAlignments(layout, visibleHubs);
+  }
+
+  const hubPosMap = new Map();
+  for (const h of visibleHubs.values()) {
+    hubPosMap.set(h.id, getVisualHubPos(layout, h));
+    for (const p of h.parents) {
+      let s = _renderedRefs.hubsByNode.get(p);
+      if (!s) { s = new Set(); _renderedRefs.hubsByNode.set(p, s); }
+      s.add(h.id);
+    }
+    for (const c of h.children) {
+      let s = _renderedRefs.hubsByNode.get(c);
+      if (!s) { s = new Set(); _renderedRefs.hubsByNode.set(c, s); }
+      s.add(h.id);
+    }
   }
 
   // Draw edges
@@ -3344,7 +4056,7 @@ function renderGraph({ recomputeAlignments = false } = {}) {
       if (!visible.has(edge.from) || !visible.has(edge.to)) continue;
     }
 
-    const dStr = computeEdgePath(layout, edge, visibleHubs);
+    const dStr = computeEdgePath(layout, edge, visibleHubs, hubPosMap);
     if (!dStr) continue;
 
     const cls = ["edge-path", edge.confidence || ""];
@@ -3354,16 +4066,33 @@ function renderGraph({ recomputeAlignments = false } = {}) {
     else if (hasHighlight) cls.push("dimmed");
 
     const pathEl = svgEl("path", { d: dStr, class: cls.join(" ") });
-    layerEdges.appendChild(pathEl);
-    _renderedRefs.edges.push({ edge, el: pathEl });
+    fragEdges.appendChild(pathEl);
+    const edgeItem = { edge, el: pathEl };
+    _renderedRefs.edges.push(edgeItem);
+    if (edge.kind === "spouse_to_hub") {
+      let list = _renderedRefs.edgesByHub.get(edge.to);
+      if (!list) { list = []; _renderedRefs.edgesByHub.set(edge.to, list); }
+      list.push(edgeItem);
+    } else if (edge.kind === "hub_to_child") {
+      let list = _renderedRefs.edgesByHub.get(edge.from);
+      if (!list) { list = []; _renderedRefs.edgesByHub.set(edge.from, list); }
+      list.push(edgeItem);
+    } else {
+      for (const nodeId of [edge.from, edge.to]) {
+        let list = _renderedRefs.edgesByNode.get(nodeId);
+        if (!list) { list = []; _renderedRefs.edgesByNode.set(nodeId, list); }
+        list.push(edgeItem);
+      }
+    }
   }
+  layerEdges.appendChild(fragEdges);
 
   // Draw Marriage / Family Hubs
   for (const h of visibleHubs.values()) {
     const gCls = ["hub-group"];
     if (state.showConsang && h.consanguineous) gCls.push("consang");
     if (state.selectedHubId === h.id) gCls.push("selected");
-    const hp = getVisualHubPos(layout, h);
+    const hp = hubPosMap.get(h.id);
     const g = svgEl("g", { class: gCls.join(" "), transform: `translate(${hp.x},${hp.y})` });
     const s = h.inline ? 6.5 : 8;
     g.appendChild(svgEl("polygon", {
@@ -3431,9 +4160,10 @@ function renderGraph({ recomputeAlignments = false } = {}) {
       ev.stopPropagation();
       selectHub(h);
     });
-    layerHubs.appendChild(g);
+    fragHubs.appendChild(g);
     _renderedRefs.hubs.set(h.id, g);
   }
+  layerHubs.appendChild(fragHubs);
 
   const svgRoot = document.getElementById("graph");
   if (svgRoot) svgRoot.classList.toggle("compact-collateral", !!state.compactCollateral);
@@ -3593,9 +4323,10 @@ function renderGraph({ recomputeAlignments = false } = {}) {
         onNodeClick(iid, ev.shiftKey);
       }
     });
-    layerNodes.appendChild(g);
+    fragNodes.appendChild(g);
     _renderedRefs.nodes.set(iid, g);
   }
+  layerNodes.appendChild(fragNodes);
 
   const totalCollapsed = state.collapsedAncestors.size + state.collapsedCollaterals.size;
   const btnExpandAll = document.getElementById("btn-expand-all");
@@ -3662,7 +4393,7 @@ function selectHub(hub) {
   state.selectedId = null;
   state.compareId = null;
   state.compareMode = false;
-  state.kinshipResult = hub.kinship || null;
+  state.kinshipResult = getHubKinship(hub);
   renderGraph();
   renderDrawer();
 }
@@ -3793,7 +4524,8 @@ function renderDrawer() {
       drawer.appendChild(el("p", {}, `Date: ${hub.marriage.date || "Unknown"} · Place: ${hub.marriage.place || "Unknown"}`));
       if (hub.marriage.notes) drawer.appendChild(el("p", {}, hub.marriage.notes));
     }
-    if (hub.kinship) drawer.appendChild(renderKinshipSection(hub.kinship));
+    const hubKinship = getHubKinship(hub);
+    if (hubKinship) drawer.appendChild(renderKinshipSection(hubKinship));
 
     drawer.appendChild(el("h3", {}, "Parents / Spouses"));
     const ulP = el("ul");
@@ -3920,7 +4652,7 @@ function renderDrawer() {
           if (ind.kinship) {
             kinText = `${catLabels[ind.kinship.category] || ind.kinship.category}: ${ind.kinship.label}`;
           } else if (state.placeFocalId && state.data.individuals[state.placeFocalId]) {
-            const k = ind.id === state.placeFocalId ? { label: "focal person (self)" } : computeClientKinship(state.placeFocalId, ind.id);
+            const k = ind.id === state.placeFocalId ? { label: "focal person (self)" } : computeKinshipClient(state.data, state.placeFocalId, ind.id);
             kinText = k?.paths?.length ? k.paths[0].label : (k?.are_married ? "spouse" : (k?.label || "FAN / unrelated"));
           }
           tb.appendChild(el("tr", {},
@@ -4694,6 +5426,33 @@ def _save_viewer_state(root: Path | str, state_obj: dict[str, Any]) -> dict[str,
     return clean
 
 
+def _workspace_signature(root_path: Path) -> tuple[Any, ...]:
+    """Build a lightweight stat signature over workspace YAML and Markdown inputs."""
+    sig: list[Any] = []
+    for rel in (".genealogy.yaml", Path("data") / "relationships.yaml"):
+        p = root_path / rel
+        try:
+            st = p.stat()
+            sig.append((str(rel), st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino))
+        except OSError:
+            sig.append((str(rel), None))
+    data_dir = root_path / "data"
+    for sub in ("individuals", "sources", "places"):
+        sub_dir = data_dir / sub
+        entries: list[tuple[str, int, int, int, int]] = []
+        try:
+            with os.scandir(sub_dir) as it:
+                for entry in it:
+                    if entry.name.endswith(".md"):
+                        st = entry.stat()
+                        entries.append((entry.name, st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino))
+        except OSError:
+            pass
+        entries.sort()
+        sig.append((sub, tuple(entries)))
+    return tuple(sig)
+
+
 def render_viewer_html(
     root: Path | str | Dataset,
     *,
@@ -4704,7 +5463,7 @@ def render_viewer_html(
     payload = build_viewer_payload(root, redact_living=redact_living)
     saved_state = {} if standalone else _load_viewer_state(root)
     # Escape closing script tags defensively inside inline JSON
-    json_blob = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    json_blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     state_blob = json.dumps(saved_state, ensure_ascii=False).replace("</", "<\\/")
     return (
         _VIEWER_HTML_TEMPLATE.replace("__STANDALONE_FLAG__", "true" if standalone else "false")
@@ -4736,7 +5495,53 @@ def make_viewer_server(
 ) -> ThreadingHTTPServer:
     """Create a local ThreadingHTTPServer serving the interactive tree viewer & live API."""
     root_path = Path(root).resolve()
-    artifacts_root = load_dataset(root_path).artifacts_dir
+    artifacts_root = Dataset(root=root_path, config=load_workspace_config(root_path)).artifacts_dir
+
+    cache_lock = threading.Lock()
+    server_cache: dict[str, Any] = {
+        "sig": None,
+        "ds": None,
+        "ctx": None,
+        "payloads": {},
+    }
+
+    def _get_dataset_and_ctx() -> tuple[Dataset, KinshipContext]:
+        sig = _workspace_signature(root_path)
+        with cache_lock:
+            if server_cache["sig"] == sig and server_cache["ds"] is not None:
+                return server_cache["ds"], server_cache["ctx"]
+            ds_loaded = load_dataset(root_path)
+            ctx_loaded = KinshipContext(ds_loaded)
+            server_cache["sig"] = sig
+            server_cache["ds"] = ds_loaded
+            server_cache["ctx"] = ctx_loaded
+            server_cache["payloads"].clear()
+            return ds_loaded, ctx_loaded
+
+    def _get_payload_bundle(redact_val: bool) -> tuple[dict[str, Any], bytes, str]:
+        sig = _workspace_signature(root_path)
+        with cache_lock:
+            if server_cache["sig"] == sig and redact_val in server_cache["payloads"]:
+                return server_cache["payloads"][redact_val]
+            if server_cache["sig"] != sig or server_cache["ds"] is None:
+                ds_loaded = load_dataset(root_path)
+                ctx_loaded = KinshipContext(ds_loaded)
+                server_cache["sig"] = sig
+                server_cache["ds"] = ds_loaded
+                server_cache["ctx"] = ctx_loaded
+                server_cache["payloads"].clear()
+            else:
+                ds_loaded = server_cache["ds"]
+                ctx_loaded = server_cache["ctx"]
+            payload_obj = build_viewer_payload(ds_loaded, redact_living=redact_val, _ctx=ctx_loaded)
+            raw_json = json.dumps(payload_obj, ensure_ascii=False, separators=(",", ":"))
+            bundle = (
+                payload_obj,
+                raw_json.encode("utf-8"),
+                raw_json.replace("</", "<\\/"),
+            )
+            server_cache["payloads"][redact_val] = bundle
+            return bundle
 
     class ViewerHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -4763,15 +5568,22 @@ def make_viewer_server(
             qs = parse_qs(parsed.query)
 
             if path in ("/", "/index.html"):
-                html = render_viewer_html(root_path, standalone=False, redact_living=redact_living)
+                _, _, json_blob = _get_payload_bundle(redact_living)
+                saved_state = _load_viewer_state(root_path)
+                state_blob = json.dumps(saved_state, ensure_ascii=False).replace("</", "<\\/")
+                html = (
+                    _VIEWER_HTML_TEMPLATE.replace("__STANDALONE_FLAG__", "false")
+                    .replace("__INITIAL_JSON__", json_blob)
+                    .replace("__INITIAL_VIEWER_STATE__", state_blob)
+                )
                 self._send_bytes(html.encode("utf-8"), "text/html; charset=utf-8")
                 return
 
             if path == "/api/graph.json":
                 redact_q = qs.get("redact_living", [None])[0]
                 redact_val = redact_living if redact_q is None else (redact_q != "0")
-                payload = build_viewer_payload(root_path, redact_living=redact_val)
-                self._send_json(payload)
+                _, json_bytes, _ = _get_payload_bundle(redact_val)
+                self._send_bytes(json_bytes, "application/json; charset=utf-8")
                 return
 
             if path == "/api/viewer-state":
@@ -4785,7 +5597,8 @@ def make_viewer_server(
                     self._send_json({"error": "Parameters 'a' and 'b' are required"}, status=400)
                     return
                 try:
-                    rep = compute_kinship(root_path, a, b)
+                    ds_live, ctx_live = _get_dataset_and_ctx()
+                    rep = compute_kinship(ds_live, a, b, _ctx=ctx_live)
                     self._send_json(rep.to_dict())
                 except KeyError as exc:
                     self._send_json({"error": str(exc)}, status=404)
@@ -4797,14 +5610,16 @@ def make_viewer_server(
                     self._send_json({"error": "Parameter 'id' is required"}, status=400)
                     return
                 try:
-                    rep = compute_pedigree_collapse(root_path, iid)
+                    ds_live, ctx_live = _get_dataset_and_ctx()
+                    rep = compute_pedigree_collapse(ds_live, iid, _ctx=ctx_live)
                     self._send_json(rep.to_dict())
                 except KeyError as exc:
                     self._send_json({"error": str(exc)}, status=404)
                 return
 
             if path == "/api/places":
-                self._send_json(list_places_summary(root_path))
+                ds_live, _ = _get_dataset_and_ctx()
+                self._send_json(list_places_summary(ds_live))
                 return
 
             if path == "/api/place":
@@ -4816,9 +5631,9 @@ def make_viewer_server(
                 redact_q = qs.get("redact_living", [None])[0]
                 redact_val = redact_living if redact_q is None else (redact_q != "0")
                 try:
-                    ds_live = load_dataset(root_path)
-                    profile = compute_place_profile(ds_live, pid, root_id=root_ind)
-                    scrub_fn = _build_living_redactor(ds_live)
+                    ds_live, ctx_live = _get_dataset_and_ctx()
+                    profile = compute_place_profile(ds_live, pid, root_id=root_ind, _ctx=ctx_live)
+                    scrub_fn = _build_living_redactor(ds_live) if redact_val else (lambda t: t)
                     self._send_json(_redact_place_profile(profile, ds_live, scrub_fn, redact_val))
                 except KeyError as exc:
                     self._send_json({"error": str(exc)}, status=404)

@@ -11,6 +11,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+_YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 # Identifier patterns matching AGENTS.md
 INDIVIDUAL_ID_RE = re.compile(r"^I-[A-Z0-9]+(?:-[A-Z0-9]+)*-(?:\d{4}|UNKNOWN)(?:-\d{2})?$")
 SOURCE_ID_RE = re.compile(r"^S-(?:\d{4}|UNDATED)-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
@@ -651,7 +653,7 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not match:
         raise ValueError("Missing or malformed YAML frontmatter delimited by '---'")
     yaml_str, body = match.group(1), match.group(2)
-    data = yaml.safe_load(yaml_str)
+    data = yaml.load(yaml_str, Loader=_YAML_SAFE_LOADER)
     if data is None:
         data = {}
     if not isinstance(data, dict):
