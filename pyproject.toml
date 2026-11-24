@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "genealogy-workspace"
-version = "0.12.1"
+version = "0.12.2"
 description = "Evidence-based, AI-assisted genealogy research toolkit, validator, interactive viewer, and plugin"
 readme = "README.md"
 license = "GPL-3.0-or-later"
