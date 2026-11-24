@@ -1819,6 +1819,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const STANDALONE_MODE = __STANDALONE_FLAG__;
 const INITIAL_DATA = __INITIAL_JSON__;
+const INITIAL_VIEWER_STATE = __INITIAL_VIEWER_STATE__;
 
 const state = {
   data: INITIAL_DATA,
@@ -3021,6 +3022,7 @@ function alignParentsOverNode(iid) {
 
   const targetOffsets = computeOffsetsFromAlignments(layout, _renderedRefs.visibleHubs);
   animateRowOffsetsTo(targetOffsets, 420);
+  scheduleSaveViewerState();
 }
 
 function clearHoverFocusImmediate() {
@@ -3122,6 +3124,7 @@ function toggleBranchCollapse(iid) {
     state.ty = oldScreenY - nextPos.y * state.scale;
     applyTransform();
   }
+  scheduleSaveViewerState();
 }
 
 function toggleHubCollaterals(hubKey, hubId) {
@@ -3147,6 +3150,7 @@ function toggleHubCollaterals(hubKey, hubId) {
     state.ty = oldScreenY - nextPos.y * state.scale;
     applyTransform();
   }
+  scheduleSaveViewerState();
 }
 
 function collapseAllCollaterals() {
@@ -3160,6 +3164,7 @@ function collapseAllCollaterals() {
   }
   renderGraph({ recomputeAlignments: true });
   fitToView({ preserveAlignments: true });
+  scheduleSaveViewerState();
 }
 
 function getSearchMatches() {
@@ -3638,6 +3643,7 @@ async function onNodeClick(iid, shiftKey) {
     state.kinshipResult = null;
     renderGraph();
     renderDrawer();
+    scheduleSaveViewerState();
     return;
   }
   state.selectedId = iid;
@@ -3648,6 +3654,7 @@ async function onNodeClick(iid, shiftKey) {
   renderGraph();
   renderDrawer();
   alignParentsOverNode(iid);
+  scheduleSaveViewerState();
 }
 
 function selectHub(hub) {
@@ -4171,7 +4178,12 @@ function initPanZoom() {
     state.ty = e.clientY - sy;
     applyTransform();
   });
-  wrap.addEventListener("pointerup", () => { dragging = false; });
+  wrap.addEventListener("pointerup", () => {
+    if (dragging) {
+      dragging = false;
+      scheduleSaveViewerState();
+    }
+  });
 
   wrap.addEventListener("wheel", (e) => {
     e.preventDefault();
@@ -4184,11 +4196,12 @@ function initPanZoom() {
     state.ty = my - (my - state.ty) * (nextScale / state.scale);
     state.scale = nextScale;
     applyTransform();
+    scheduleSaveViewerState();
   }, { passive: false });
 
-  document.getElementById("btn-zoom-in").addEventListener("click", () => { state.scale = Math.min(2.5, state.scale * 1.25); applyTransform(); });
-  document.getElementById("btn-zoom-out").addEventListener("click", () => { state.scale = Math.max(0.04, state.scale / 1.25); applyTransform(); });
-  document.getElementById("btn-fit").addEventListener("click", () => fitToView());
+  document.getElementById("btn-zoom-in").addEventListener("click", () => { state.scale = Math.min(2.5, state.scale * 1.25); applyTransform(); scheduleSaveViewerState(); });
+  document.getElementById("btn-zoom-out").addEventListener("click", () => { state.scale = Math.max(0.04, state.scale / 1.25); applyTransform(); scheduleSaveViewerState(); });
+  document.getElementById("btn-fit").addEventListener("click", () => { fitToView(); scheduleSaveViewerState(); });
   document.getElementById("btn-collapse-collaterals").addEventListener("click", collapseAllCollaterals);
   document.getElementById("btn-expand-all").addEventListener("click", () => {
     state.collapsedAncestors.clear();
@@ -4197,10 +4210,12 @@ function initPanZoom() {
     state.rowOffsets = {};
     renderGraph();
     fitToView();
+    scheduleSaveViewerState();
   });
   document.getElementById("btn-clear-sel").addEventListener("click", () => {
     state.selectedId = null; state.selectedHubId = null; state.compareId = null; state.kinshipResult = null;
     renderGraph(); renderDrawer();
+    scheduleSaveViewerState();
   });
 }
 
@@ -4388,6 +4403,7 @@ function initToolbar() {
     state.rowOffsets = {};
     state.focusMode = e.target.value;
     renderGraph();
+    scheduleSaveViewerState();
   });
   document.getElementById("tract-filter").addEventListener("change", (e) => {
     state.selectedTract = e.target.value;
@@ -4437,18 +4453,20 @@ function initToolbar() {
       eraSlider.setAttribute("aria-valuetext", isCen ? `Year ${state.eraYear} (National census year)` : `Year ${state.eraYear}`);
     }
     renderGraph();
+    scheduleSaveViewerState();
   };
   eraCheck.addEventListener("change", syncEra);
   eraSlider.addEventListener("input", syncEra);
 
-  document.getElementById("toggle-fan").addEventListener("change", (e) => { state.showFan = e.target.checked; renderGraph(); });
-  document.getElementById("toggle-consang").addEventListener("change", (e) => { state.showConsang = e.target.checked; renderGraph(); });
+  document.getElementById("toggle-fan").addEventListener("change", (e) => { state.showFan = e.target.checked; renderGraph(); scheduleSaveViewerState(); });
+  document.getElementById("toggle-consang").addEventListener("change", (e) => { state.showConsang = e.target.checked; renderGraph(); scheduleSaveViewerState(); });
   document.getElementById("toggle-compact-collateral").addEventListener("change", (e) => {
     state.compactCollateral = e.target.checked;
     const svg = document.getElementById("graph");
     if (svg) svg.classList.toggle("compact-collateral", state.compactCollateral);
+    scheduleSaveViewerState();
   });
-  document.getElementById("toggle-excluded").addEventListener("change", (e) => { state.showExcluded = e.target.checked; renderGraph(); });
+  document.getElementById("toggle-excluded").addEventListener("change", (e) => { state.showExcluded = e.target.checked; renderGraph(); scheduleSaveViewerState(); });
   document.getElementById("btn-export-svg").addEventListener("click", exportSvg);
 
   const redactBox = document.getElementById("toggle-redact");
@@ -4466,19 +4484,214 @@ function initToolbar() {
   }
 }
 
+let _saveStateTimer = null;
+let _restoringState = false;
+
+function viewerStorageKey() {
+  return `genealogy-viewer-state:${state.data?.meta?.workspace_name || "default"}`;
+}
+
+function serializeViewerState() {
+  return {
+    version: 1,
+    showFan: !!state.showFan,
+    showConsang: !!state.showConsang,
+    compactCollateral: !!state.compactCollateral,
+    showExcluded: !!state.showExcluded,
+    focusMode: state.focusMode || "all",
+    eraEnabled: !!state.eraEnabled,
+    eraYear: state.eraYear,
+    collapsedAncestors: [...state.collapsedAncestors],
+    collapsedCollaterals: [...state.collapsedCollaterals],
+    rowAlignments: { ...state.rowAlignments },
+    selectedId: state.selectedId || null,
+    viewport: {
+      tx: Math.round(state.tx * 10) / 10,
+      ty: Math.round(state.ty * 10) / 10,
+      scale: Math.round(state.scale * 10000) / 10000,
+    },
+  };
+}
+
+function scheduleSaveViewerState() {
+  if (_restoringState) return;
+  clearTimeout(_saveStateTimer);
+  _saveStateTimer = setTimeout(() => {
+    const payload = serializeViewerState();
+    if (STANDALONE_MODE) {
+      try { localStorage.setItem(viewerStorageKey(), JSON.stringify(payload)); } catch { /* ignore */ }
+      return;
+    }
+    fetch("/api/viewer-state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => { /* ignore transient network errors */ });
+  }, 280);
+}
+
+function loadInitialViewerState() {
+  if (!STANDALONE_MODE && INITIAL_VIEWER_STATE && typeof INITIAL_VIEWER_STATE === "object") {
+    return INITIAL_VIEWER_STATE;
+  }
+  if (STANDALONE_MODE) {
+    try {
+      const raw = localStorage.getItem(viewerStorageKey());
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+  }
+  return {};
+}
+
+function applySavedViewerState(saved) {
+  if (!saved || typeof saved !== "object") return false;
+  _restoringState = true;
+  let restoredViewport = false;
+  try {
+    const inds = state.data?.individuals || {};
+    const validHubKeys = new Set((state.data?.layout?.hubs || []).map(hubKeyOf));
+
+    if (typeof saved.showFan === "boolean") {
+      state.showFan = saved.showFan;
+      const elBox = document.getElementById("toggle-fan");
+      if (elBox) elBox.checked = state.showFan;
+    }
+    if (typeof saved.showConsang === "boolean") {
+      state.showConsang = saved.showConsang;
+      const elBox = document.getElementById("toggle-consang");
+      if (elBox) elBox.checked = state.showConsang;
+    }
+    if (typeof saved.compactCollateral === "boolean") {
+      state.compactCollateral = saved.compactCollateral;
+      const elBox = document.getElementById("toggle-compact-collateral");
+      if (elBox) elBox.checked = state.compactCollateral;
+    }
+    if (typeof saved.showExcluded === "boolean") {
+      state.showExcluded = saved.showExcluded;
+      const elBox = document.getElementById("toggle-excluded");
+      if (elBox) elBox.checked = state.showExcluded;
+    }
+    if (["all", "ancestors", "descendants"].includes(saved.focusMode)) {
+      state.focusMode = saved.focusMode;
+      const elSel = document.getElementById("focus-mode");
+      if (elSel) elSel.value = state.focusMode;
+    }
+    if (typeof saved.eraYear === "number" && Number.isFinite(saved.eraYear)) {
+      const eraSlider = document.getElementById("era-slider");
+      const eMin = parseInt(eraSlider?.min || "1500", 10);
+      const eMax = parseInt(eraSlider?.max || "2020", 10);
+      state.eraYear = Math.min(eMax, Math.max(eMin, Math.round(saved.eraYear)));
+      if (eraSlider) eraSlider.value = String(state.eraYear);
+    }
+    if (typeof saved.eraEnabled === "boolean") {
+      state.eraEnabled = saved.eraEnabled;
+      const eraCheck = document.getElementById("era-enabled");
+      const eraSlider = document.getElementById("era-slider");
+      const eraLabel = document.getElementById("era-year-label");
+      if (eraCheck) eraCheck.checked = state.eraEnabled;
+      if (eraSlider) eraSlider.disabled = !state.eraEnabled;
+      if (eraLabel) eraLabel.textContent = state.eraEnabled ? String(state.eraYear) : "Off";
+    }
+    if (Array.isArray(saved.collapsedAncestors)) {
+      state.collapsedAncestors = new Set(saved.collapsedAncestors.filter(id => typeof id === "string" && id in inds));
+    }
+    if (Array.isArray(saved.collapsedCollaterals)) {
+      state.collapsedCollaterals = new Set(saved.collapsedCollaterals.filter(k => typeof k === "string" && validHubKeys.has(k)));
+    }
+    if (saved.rowAlignments && typeof saved.rowAlignments === "object") {
+      const cleanAlign = {};
+      for (const [k, cid] of Object.entries(saved.rowAlignments)) {
+        if (typeof cid === "string" && cid in inds) {
+          const gen = state.data?.layout?.nodes?.[cid]?.generation;
+          cleanAlign[gen !== undefined ? gen : k] = cid;
+        }
+      }
+      state.rowAlignments = cleanAlign;
+    }
+    if (typeof saved.selectedId === "string" && saved.selectedId in inds) {
+      state.selectedId = saved.selectedId;
+    }
+    const vp = saved.viewport;
+    if (
+      vp &&
+      typeof vp.tx === "number" && Number.isFinite(vp.tx) &&
+      typeof vp.ty === "number" && Number.isFinite(vp.ty) &&
+      typeof vp.scale === "number" && Number.isFinite(vp.scale) &&
+      vp.scale >= 0.04 && vp.scale <= 2.5
+    ) {
+      state.tx = vp.tx;
+      state.ty = vp.ty;
+      state.scale = vp.scale;
+      restoredViewport = true;
+    }
+  } finally {
+    _restoringState = false;
+  }
+  return restoredViewport;
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   initDialogLightDismissFallback();
   initCopyHandlers();
   initPanZoom();
   initToolbar();
-  renderGraph();
+  const hadSavedViewport = applySavedViewerState(loadInitialViewerState());
+  renderGraph({ recomputeAlignments: true });
   renderDrawer();
-  fitToView();
+  if (hadSavedViewport) applyTransform();
+  else fitToView();
 });
 </script>
 </body>
 </html>
 """
+
+
+_VIEWER_STATE_RELPATH = Path("build") / "viewer-state.json"
+_ALLOWED_VIEWER_STATE_KEYS = {
+    "version",
+    "showFan",
+    "showConsang",
+    "compactCollateral",
+    "showExcluded",
+    "focusMode",
+    "eraEnabled",
+    "eraYear",
+    "collapsedAncestors",
+    "collapsedCollaterals",
+    "rowAlignments",
+    "selectedId",
+    "viewport",
+}
+
+
+def _load_viewer_state(root: Path | str | Dataset) -> dict[str, Any]:
+    """Load persisted viewer UI state from <root>/build/viewer-state.json if present."""
+    root_path = root.root if isinstance(root, Dataset) else Path(root).resolve()
+    state_path = root_path / _VIEWER_STATE_RELPATH
+    if not state_path.is_file():
+        return {}
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in _ALLOWED_VIEWER_STATE_KEYS}
+
+
+def _save_viewer_state(root: Path | str, state_obj: dict[str, Any]) -> dict[str, Any]:
+    """Atomically persist whitelisted viewer UI state to <root>/build/viewer-state.json."""
+    root_path = Path(root).resolve()
+    state_path = root_path / _VIEWER_STATE_RELPATH
+    clean = {k: v for k, v in state_obj.items() if k in _ALLOWED_VIEWER_STATE_KEYS}
+    clean.setdefault("version", 1)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(clean, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(state_path)
+    return clean
 
 
 def render_viewer_html(
@@ -4489,11 +4702,15 @@ def render_viewer_html(
 ) -> str:
     """Render the self-contained interactive HTML viewer."""
     payload = build_viewer_payload(root, redact_living=redact_living)
+    saved_state = {} if standalone else _load_viewer_state(root)
     # Escape closing script tags defensively inside inline JSON
     json_blob = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    return _VIEWER_HTML_TEMPLATE.replace(
-        "__STANDALONE_FLAG__", "true" if standalone else "false"
-    ).replace("__INITIAL_JSON__", json_blob)
+    state_blob = json.dumps(saved_state, ensure_ascii=False).replace("</", "<\\/")
+    return (
+        _VIEWER_HTML_TEMPLATE.replace("__STANDALONE_FLAG__", "true" if standalone else "false")
+        .replace("__INITIAL_JSON__", json_blob)
+        .replace("__INITIAL_VIEWER_STATE__", state_blob)
+    )
 
 
 def export_viewer_html(
@@ -4555,6 +4772,10 @@ def make_viewer_server(
                 redact_val = redact_living if redact_q is None else (redact_q != "0")
                 payload = build_viewer_payload(root_path, redact_living=redact_val)
                 self._send_json(payload)
+                return
+
+            if path == "/api/viewer-state":
+                self._send_json(_load_viewer_state(root_path))
                 return
 
             if path == "/api/kinship":
@@ -4619,6 +4840,31 @@ def make_viewer_server(
                 return
 
             self._send_bytes(b"Not Found", "text/plain", status=HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path != "/api/viewer-state":
+                self._send_bytes(b"Not Found", "text/plain", status=HTTPStatus.NOT_FOUND)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json({"error": "Invalid Content-Length"}, status=400)
+                return
+            if length < 0 or length > 524_288:
+                self._send_json({"error": "Payload too large"}, status=413)
+                return
+            raw_body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                body = json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "Invalid JSON body"}, status=400)
+                return
+            if not isinstance(body, dict):
+                self._send_json({"error": "Expected JSON object"}, status=400)
+                return
+            saved = _save_viewer_state(root_path, body)
+            self._send_json(saved)
 
     return ThreadingHTTPServer((host, port), ViewerHandler)
 

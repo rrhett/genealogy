@@ -54,6 +54,7 @@ def test_viewer_payload_and_static_export(tmp_path: Path) -> None:
     assert 'id="btn-collapse-collaterals"' in html_text
     assert "toggleHubCollaterals" in html_text
     assert "roundedMultiGenPath" in html_text
+    assert "INITIAL_VIEWER_STATE = {}" in html_text
     assert 'command: "--copy"' in html_text
     assert "STANDALONE_MODE = true" in html_text
     assert "Living (Redacted)" in html_text
@@ -264,6 +265,68 @@ def test_layout_coupled_inversion_zero_crossings(tmp_path: Path) -> None:
                 x1, y1 = segs[i]
                 x2, y2 = segs[j]
                 assert (x1 - x2) * (y1 - y2) >= 0, f"Crossing detected entering gen {gen}: {segs[i]} vs {segs[j]}"
+
+
+def test_viewer_state_persistence_round_trip(tmp_path: Path) -> None:
+    """Viewer options & layout state persist to <root>/build/viewer-state.json across restarts."""
+    import shutil
+
+    ws = tmp_path / "west-copy"
+    shutil.copytree(EXAMPLE_ROOT, ws)
+
+    server = make_viewer_server(ws, host="127.0.0.1", port=0, redact_living=True)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        # Initially empty
+        with urllib.request.urlopen(f"{base}/api/viewer-state") as resp:
+            assert json.loads(resp.read().decode("utf-8")) == {}
+
+        # POST viewer state (including an unknown key that should be stripped)
+        payload = {
+            "version": 1,
+            "compactCollateral": False,
+            "showFan": False,
+            "collapsedAncestors": ["I-WEST-EDGAR-1909"],
+            "collapsedCollaterals": ["I-MILLER-SARAH-1834|I-WEST-THOMAS-1830"],
+            "rowAlignments": {"3": "I-WEST-EDGAR-1909"},
+            "viewport": {"tx": 120.5, "ty": -40.0, "scale": 0.85},
+            "unexpectedKey": "should-be-dropped",
+        }
+        req = urllib.request.Request(
+            f"{base}/api/viewer-state",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+            saved = json.loads(resp.read().decode("utf-8"))
+            assert saved["compactCollateral"] is False
+            assert saved["collapsedAncestors"] == ["I-WEST-EDGAR-1909"]
+            assert "unexpectedKey" not in saved
+
+        # Verify file on disk in build/viewer-state.json
+        state_file = ws / "build" / "viewer-state.json"
+        assert state_file.is_file()
+        on_disk = json.loads(state_file.read_text(encoding="utf-8"))
+        assert on_disk["viewport"] == {"tx": 120.5, "ty": -40.0, "scale": 0.85}
+
+        # GET /api/viewer-state and GET / both reflect saved state
+        with urllib.request.urlopen(f"{base}/api/viewer-state") as resp:
+            assert json.loads(resp.read().decode("utf-8")) == on_disk
+        with urllib.request.urlopen(f"{base}/") as resp:
+            html = resp.read().decode("utf-8")
+            assert '"collapsedAncestors": ["I-WEST-EDGAR-1909"]' in html
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Standalone export must NOT leak local build/viewer-state.json
+    out_html = export_viewer_html(ws, tmp_path / "standalone.html", redact_living=True)
+    assert "INITIAL_VIEWER_STATE = {}" in out_html.read_text(encoding="utf-8")
 
 
 def test_viewer_http_server_endpoints_and_traversal_guard() -> None:
