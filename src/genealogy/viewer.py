@@ -32,22 +32,90 @@ from genealogy.schema import parse_genealogy_date
 CARD_W = 216
 CARD_H = 82
 HUB_SIZE = 18
-LAYER_GAP_Y = 165
-NODE_GAP_X = 256
+LAYER_GAP_Y = 176
+COUPLE_GAP_X = 28
+UNIT_GAP_X = 56
+MARGIN_X = 140
+MARGIN_Y = 92
+
+
+def _pava_place_row(widths: list[float], targets: list[float], gap: float) -> list[float]:
+    """Place ordered intervals of given widths as close to targets as possible without overlap."""
+    n = len(widths)
+    if n == 0:
+        return []
+    offsets = [0.0] * n
+    for i in range(1, n):
+        offsets[i] = offsets[i - 1] + (widths[i - 1] + widths[i]) / 2.0 + gap
+
+    # Pool Adjacent Violators on z[i] = targets[i] - offsets[i]
+    blocks: list[list[float]] = []
+    for i in range(n):
+        z = targets[i] - offsets[i]
+        blocks.append([z, 1.0, float(i), float(i)])
+        while len(blocks) >= 2:
+            prev = blocks[-2]
+            curr = blocks[-1]
+            if (prev[0] / prev[1]) > (curr[0] / curr[1]):
+                prev[0] += curr[0]
+                prev[1] += curr[1]
+                prev[3] = curr[3]
+                blocks.pop()
+            else:
+                break
+
+    centers = [0.0] * n
+    for sum_z, count, start_i, end_i in blocks:
+        val = sum_z / count
+        for i in range(int(start_i), int(end_i) + 1):
+            centers[i] = val + offsets[i]
+    return centers
+
+
+def _generation_label(delta: int) -> str:
+    """Human-readable generation label relative to a focal person (delta = focal_rank - rank)."""
+    if delta == 0:
+        return "Focal / Self"
+    if delta == 1:
+        return "Parents (+1)"
+    if delta == 2:
+        return "Grandparents (+2)"
+    if delta == 3:
+        return "Great-Grandparents (+3)"
+    if delta > 3:
+        return f"{delta - 2}× Great-Grandparents (+{delta})"
+    if delta == -1:
+        return "Children (-1)"
+    if delta == -2:
+        return "Grandchildren (-2)"
+    return f"{-delta - 2}× Great-Grandchildren ({delta})"
 
 
 def _compute_dag_layout(
     ds: Dataset,
     consanguineous_pairs: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Compute a generation-layered DAG + Marriage-Hub layout minimizing crossings."""
+    """Compute a generation-aligned, couple-paired DAG + Marriage-Hub layout minimizing crossings."""
     ind_ids = sorted(ds.individuals.keys())
     if not ind_ids:
-        return {"nodes": {}, "hubs": [], "edges": [], "width": 800, "height": 500}
+        return {
+            "nodes": {},
+            "hubs": [],
+            "edges": [],
+            "generations": [],
+            "width": 800,
+            "height": 500,
+            "card_w": CARD_W,
+            "card_h": CARD_H,
+        }
 
     parents_of: dict[str, list[str]] = defaultdict(list)
     children_of: dict[str, list[str]] = defaultdict(list)
     spouses_of: dict[str, list[str]] = defaultdict(list)
+    partners_of: dict[str, list[str]] = defaultdict(list)
+    siblings_of: dict[str, list[str]] = defaultdict(list)
+    fan_of: dict[str, list[str]] = defaultdict(list)
+    marriage_dates: dict[tuple[str, str], str] = {}
 
     for rel in ds.relationships:
         if rel.person_1 not in ds.individuals or rel.person_2 not in ds.individuals:
@@ -62,125 +130,355 @@ def _compute_dag_layout(
                 spouses_of[rel.person_1].append(rel.person_2)
             if rel.person_1 not in spouses_of[rel.person_2]:
                 spouses_of[rel.person_2].append(rel.person_1)
+            if rel.person_2 not in partners_of[rel.person_1]:
+                partners_of[rel.person_1].append(rel.person_2)
+            if rel.person_1 not in partners_of[rel.person_2]:
+                partners_of[rel.person_2].append(rel.person_1)
+            if rel.date:
+                key = tuple(sorted((rel.person_1, rel.person_2)))
+                marriage_dates[key] = rel.date
+        elif rel.type == "sibling":
+            if rel.person_2 not in siblings_of[rel.person_1]:
+                siblings_of[rel.person_1].append(rel.person_2)
+            if rel.person_1 not in siblings_of[rel.person_2]:
+                siblings_of[rel.person_2].append(rel.person_1)
+        elif rel.type == "fan_associate":
+            if rel.person_2 not in fan_of[rel.person_1]:
+                fan_of[rel.person_1].append(rel.person_2)
+            if rel.person_1 not in fan_of[rel.person_2]:
+                fan_of[rel.person_2].append(rel.person_1)
 
-    # Step 1: Longest-path topological rank (0 = earliest known ancestor)
-    rank: dict[str, int] = {}
+    # Also treat co-parents (sharing a child) as partners so unmarried co-parents align
+    for ps in parents_of.values():
+        if len(ps) >= 2:
+            for i in range(len(ps)):
+                for j in range(i + 1, len(ps)):
+                    a, b = ps[i], ps[j]
+                    if b not in partners_of[a]:
+                        partners_of[a].append(b)
+                    if a not in partners_of[b]:
+                        partners_of[b].append(a)
 
-    def calc_rank(iid: str, visiting: set[str]) -> int:
-        if iid in rank:
-            return rank[iid]
+    def _birth_year(iid: str) -> int:
+        ind = ds.individuals[iid].data
+        b = parse_genealogy_date(ind.birth.date) if ind.birth else None
+        return b.year_min if b and b.year_min is not None else 9999
+
+    # Helper: longest ancestor depth for tie-breaking component anchors
+    depth_memo: dict[str, int] = {}
+
+    def _anc_depth(iid: str, visiting: set[str]) -> int:
+        if iid in depth_memo:
+            return depth_memo[iid]
         if iid in visiting:
             return 0
         visiting.add(iid)
         ps = parents_of.get(iid, [])
-        r = 0 if not ps else 1 + max(calc_rank(p, visiting) for p in ps)
+        d = 0 if not ps else 1 + max(_anc_depth(p, visiting) for p in ps)
         visiting.remove(iid)
-        rank[iid] = r
-        return r
+        depth_memo[iid] = d
+        return d
 
     for iid in ind_ids:
-        calc_rank(iid, set())
+        _anc_depth(iid, set())
 
-    # Step 2: Pull rootless spouses down to match their spouse's generation (without violating parent < child)
-    for _ in range(4):
-        changed = False
-        for iid in ind_ids:
-            if parents_of.get(iid):
-                continue
-            sp_ranks = [rank[s] for s in spouses_of.get(iid, []) if s in rank]
-            if not sp_ranks:
-                continue
-            target = max(sp_ranks)
-            # Must stay strictly above any child
-            child_ranks = [rank[c] for c in children_of.get(iid, []) if c in rank]
-            if child_ranks:
-                target = min(target, min(child_ranks) - 1)
-            if target > rank[iid]:
-                rank[iid] = target
-                changed = True
-        if not changed:
-            break
+    # Step 1: Connected-component BFS generation assignment anchored on focal person (or deepest sink)
+    visited_comp: set[str] = set()
+    raw_gen: dict[str, int] = {}
+    components: list[list[str]] = []
 
-    # Step 3: Pull FAN-only or unconnected founders near their connected associate's rank
+    for start in ind_ids:
+        if start in visited_comp:
+            continue
+        comp: list[str] = []
+        q = [start]
+        visited_comp.add(start)
+        while q:
+            u = q.pop(0)
+            comp.append(u)
+            for nb in (
+                parents_of.get(u, [])
+                + children_of.get(u, [])
+                + partners_of.get(u, [])
+                + siblings_of.get(u, [])
+            ):
+                if nb not in visited_comp:
+                    visited_comp.add(nb)
+                    q.append(nb)
+        components.append(comp)
+
+    focal_id = ds.focal_person_id if ds.focal_person_id in ds.individuals else None
+
+    for comp in components:
+        comp_set = set(comp)
+        if focal_id and focal_id in comp_set:
+            anchor = focal_id
+        else:
+            # Prefer a sink (no children) with deepest known ancestry, then youngest birth year
+            sinks = [u for u in comp if not children_of.get(u)]
+            candidates = sinks if sinks else comp
+            anchor = max(
+                candidates,
+                key=lambda u: (depth_memo.get(u, 0), _birth_year(u) if _birth_year(u) < 9999 else -1, u),
+            )
+
+        # BFS from anchor: parents = -1, children = +1, partners/siblings = 0
+        # Prioritize direct blood & partner links before explicit sibling links
+        comp_gen: dict[str, int] = {anchor: 0}
+        queue = [anchor]
+        while queue:
+            u = queue.pop(0)
+            gu = comp_gen[u]
+            for p in parents_of.get(u, []):
+                if p in comp_set and p not in comp_gen:
+                    comp_gen[p] = gu - 1
+                    queue.append(p)
+            for c in children_of.get(u, []):
+                if c in comp_set and c not in comp_gen:
+                    comp_gen[c] = gu + 1
+                    queue.append(c)
+            for s in partners_of.get(u, []):
+                if s in comp_set and s not in comp_gen:
+                    comp_gen[s] = gu
+                    queue.append(s)
+            for sib in siblings_of.get(u, []):
+                if sib in comp_set and sib not in comp_gen:
+                    comp_gen[sib] = gu
+                    queue.append(sib)
+
+        # Phase B: Enforce hard DAG invariant gen[parent] <= gen[child] - 1
+        # Pull parent UP when an unequal-generation inosculation cycle creates a conflict
+        for _ in range(len(comp) + 2):
+            changed = False
+            for c in comp:
+                for p in parents_of.get(c, []):
+                    if p in comp_gen and comp_gen[p] >= comp_gen[c]:
+                        comp_gen[p] = comp_gen[c] - 1
+                        changed = True
+            if not changed:
+                break
+
+        # Re-align rootless/unconstrained spouses if their partner was pulled up
+        for _ in range(2):
+            for u in comp:
+                if parents_of.get(u) or children_of.get(u):
+                    continue
+                sp_gens = [comp_gen[s] for s in partners_of.get(u, []) if s in comp_gen]
+                if sp_gens:
+                    comp_gen[u] = sp_gens[0]
+
+        for u, g in comp_gen.items():
+            raw_gen[u] = g
+
+    # Step 2: Pull FAN-only isolated individuals to their connected associate's generation
     for rel in ds.relationships:
-        if rel.type == "fan_associate" and rel.person_1 in rank and rel.person_2 in rank:
+        if rel.type == "fan_associate" and rel.person_1 in raw_gen and rel.person_2 in raw_gen:
             for a, b in ((rel.person_1, rel.person_2), (rel.person_2, rel.person_1)):
-                if not parents_of.get(a) and not children_of.get(a) and not spouses_of.get(a):
-                    rank[a] = rank[b]
+                if not parents_of.get(a) and not children_of.get(a) and not partners_of.get(a):
+                    raw_gen[a] = raw_gen[b]
 
-    # Step 4: Group into layers and run barycenter ordering to minimize crossings
+    # Normalize generations so earliest generation = 0
+    min_g = min(raw_gen.values())
+    rank: dict[str, int] = {iid: raw_gen[iid] - min_g for iid in ind_ids}
+
+    # Step 3: Group into generation layers and form atomic couple/marriage units
     layers: dict[int, list[str]] = defaultdict(list)
     for iid in ind_ids:
         layers[rank[iid]].append(iid)
-
-    # Initial deterministic order: birth year, then surname/id
-    def _sort_key(iid: str) -> tuple[int, str]:
-        ind = ds.individuals[iid].data
-        b = parse_genealogy_date(ind.birth.date) if ind.birth else None
-        return (b.year_min if b and b.year_min else 9999, iid)
-
     sorted_ranks = sorted(layers.keys())
-    for r in sorted_ranks:
-        layers[r].sort(key=_sort_key)
 
-    # Barycenter sweeps (downward + upward) keeping spouses adjacent
-    def _index_map() -> dict[str, float]:
+    def _sex_order(iid: str) -> int:
+        s = ds.individuals[iid].data.sex
+        return 0 if s == "M" else (1 if s == "F" else 2)
+
+    # Build atomic horizontal units per layer (spouses/co-parents stay adjacent!)
+    row_units: dict[int, list[list[str]]] = {}
+    for r in sorted_ranks:
+        row_set = set(layers[r])
+        same_row_partners: dict[str, list[str]] = {}
+        for u in layers[r]:
+            # Prefer explicit marriages before co-parent-only links
+            married = [s for s in spouses_of.get(u, []) if s in row_set]
+            other = [s for s in partners_of.get(u, []) if s in row_set and s not in married]
+            # Sort partners by marriage date then birth year
+            married.sort(key=lambda s: (marriage_dates.get(tuple(sorted((u, s))), "9999"), _birth_year(s), s))
+            same_row_partners[u] = married + other
+
+        used: set[str] = set()
+        units: list[list[str]] = []
+        # Deterministic ordering: process multi-spouse hubs first, then couples, then singles
+        ordered_nodes = sorted(
+            layers[r],
+            key=lambda u: (-len(same_row_partners[u]), _birth_year(u), u),
+        )
+        for u in ordered_nodes:
+            if u in used:
+                continue
+            ps = [p for p in same_row_partners[u] if p not in used]
+            if not ps:
+                used.add(u)
+                units.append([u])
+            elif len(ps) == 1:
+                v = ps[0]
+                used.add(u)
+                used.add(v)
+                pair = [u, v]
+                pair.sort(key=lambda x: (_sex_order(x), _birth_year(x), x))
+                units.append(pair)
+            else:
+                # 2+ spouses in same row: place u in the middle of its first two spouses [s1, u, s2]
+                s1, s2 = ps[0], ps[1]
+                used.add(u)
+                used.add(s1)
+                used.add(s2)
+                units.append([s1, u, s2])
+
+        units.sort(key=lambda unit: (min(_birth_year(x) for x in unit), unit[0]))
+        row_units[r] = units
+
+    # Step 4: Crossing minimization (barycenter sweeps on units + internal couple orientation flip)
+    def _node_x_index() -> dict[str, float]:
         pos: dict[str, float] = {}
         for r in sorted_ranks:
-            for idx, iid in enumerate(layers[r]):
-                pos[iid] = float(idx)
+            cursor = 0.0
+            for unit in row_units[r]:
+                for iid in unit:
+                    pos[iid] = cursor
+                    cursor += 1.0
+                cursor += 0.5
         return pos
 
-    for _ in range(6):
-        pos = _index_map()
+    for _ in range(8):
+        # Downward sweep: order by parents
+        pos = _node_x_index()
         for r in sorted_ranks[1:]:
-            def _bary_up(
-                iid: str, _pos: dict[str, float] = pos, _r: int = r
-            ) -> tuple[float, str]:
-                neighbors = parents_of.get(iid, []) + [
-                    s for s in spouses_of.get(iid, []) if rank.get(s) == _r
-                ]
-                if not neighbors:
-                    return (_pos.get(iid, 0.0), iid)
-                return (sum(_pos.get(n, 0.0) for n in neighbors) / len(neighbors), iid)
+            new_units: list[list[str]] = []
+            scored: list[tuple[float, int, str, list[str]]] = []
+            for unit in row_units[r]:
+                # Flip 2-person couple if both have parents and swapping removes an X-crossing
+                if len(unit) == 2:
+                    a, b = unit[0], unit[1]
+                    pa = [pos[p] for p in parents_of.get(a, []) if p in pos]
+                    pb = [pos[p] for p in parents_of.get(b, []) if p in pos]
+                    if pa and pb and (sum(pa) / len(pa)) > (sum(pb) / len(pb)):
+                        unit = [b, a]
+                all_p = [pos[p] for m in unit for p in parents_of.get(m, []) if p in pos]
+                if all_p:
+                    bary = sum(all_p) / len(all_p)
+                else:
+                    bary = sum(pos[m] for m in unit) / len(unit)
+                scored.append((bary, min(_birth_year(m) for m in unit), unit[0], unit))
+            scored.sort(key=lambda t: (t[0], t[1], t[2]))
+            new_units = [t[3] for t in scored]
+            row_units[r] = new_units
 
-            layers[r].sort(key=_bary_up)
-
-        pos = _index_map()
+        # Upward sweep: order by children
+        pos = _node_x_index()
         for r in reversed(sorted_ranks[:-1]):
-            def _bary_down(
-                iid: str, _pos: dict[str, float] = pos, _r: int = r
-            ) -> tuple[float, str]:
-                neighbors = children_of.get(iid, []) + [
-                    s for s in spouses_of.get(iid, []) if rank.get(s) == _r
-                ]
-                if not neighbors:
-                    return (_pos.get(iid, 0.0), iid)
-                return (sum(_pos.get(n, 0.0) for n in neighbors) / len(neighbors), iid)
+            scored_up: list[tuple[float, int, str, list[str]]] = []
+            for unit in row_units[r]:
+                all_c = [pos[c] for m in unit for c in children_of.get(m, []) if c in pos]
+                if all_c:
+                    bary = sum(all_c) / len(all_c)
+                else:
+                    bary = sum(pos[m] for m in unit) / len(unit)
+                scored_up.append((bary, min(_birth_year(m) for m in unit), unit[0], unit))
+            scored_up.sort(key=lambda t: (t[0], t[1], t[2]))
+            row_units[r] = [t[3] for t in scored_up]
 
-            layers[r].sort(key=_bary_down)
+    # Step 5: Optimal X-coordinate alignment using PAVA (parents aligned above children, zero overlap)
+    def _unit_width(unit: list[str]) -> float:
+        return len(unit) * CARD_W + (len(unit) - 1) * COUPLE_GAP_X
 
-    # Assign centered X/Y coordinates per layer
-    max_cols = max((len(v) for v in layers.values()), default=1)
-    canvas_w = max(960, max_cols * NODE_GAP_X + 160)
+    unit_centers: dict[int, list[float]] = {}
+    node_x: dict[str, float] = {}
+
+    def _sync_row_nodes(r: int, centers: list[float]) -> None:
+        unit_centers[r] = centers
+        for unit, cx in zip(row_units[r], centers, strict=True):
+            uw = _unit_width(unit)
+            left = cx - uw / 2.0 + CARD_W / 2.0
+            for idx, iid in enumerate(unit):
+                node_x[iid] = left + idx * (CARD_W + COUPLE_GAP_X)
+
+    # Initial compact centered placement
+    for r in sorted_ranks:
+        widths = [_unit_width(u) for u in row_units[r]]
+        total_w = sum(widths) + max(0, len(widths) - 1) * UNIT_GAP_X
+        cursor = -total_w / 2.0
+        centers: list[float] = []
+        for w in widths:
+            centers.append(cursor + w / 2.0)
+            cursor += w + UNIT_GAP_X
+        _sync_row_nodes(r, centers)
+
+    # Iterative downward + upward PAVA coordinate sweeps
+    for _ in range(10):
+        for r in sorted_ranks:
+            units = row_units[r]
+            widths = [_unit_width(u) for u in units]
+            targets: list[float] = []
+            for idx, unit in enumerate(units):
+                p_xs = [node_x[p] for m in unit for p in parents_of.get(m, []) if p in node_x]
+                c_xs = [node_x[c] for m in unit for c in children_of.get(m, []) if c in node_x]
+                if p_xs and c_xs:
+                    targets.append(0.55 * (sum(p_xs) / len(p_xs)) + 0.45 * (sum(c_xs) / len(c_xs)))
+                elif p_xs:
+                    targets.append(sum(p_xs) / len(p_xs))
+                elif c_xs:
+                    targets.append(sum(c_xs) / len(c_xs))
+                else:
+                    targets.append(unit_centers[r][idx])
+            _sync_row_nodes(r, _pava_place_row(widths, targets, UNIT_GAP_X))
+
+        for r in reversed(sorted_ranks):
+            units = row_units[r]
+            widths = [_unit_width(u) for u in units]
+            targets_up: list[float] = []
+            for idx, unit in enumerate(units):
+                p_xs = [node_x[p] for m in unit for p in parents_of.get(m, []) if p in node_x]
+                c_xs = [node_x[c] for m in unit for c in children_of.get(m, []) if c in node_x]
+                if p_xs and c_xs:
+                    targets_up.append(0.45 * (sum(p_xs) / len(p_xs)) + 0.55 * (sum(c_xs) / len(c_xs)))
+                elif c_xs:
+                    targets_up.append(sum(c_xs) / len(c_xs))
+                elif p_xs:
+                    targets_up.append(sum(p_xs) / len(p_xs))
+                else:
+                    targets_up.append(unit_centers[r][idx])
+            _sync_row_nodes(r, _pava_place_row(widths, targets_up, UNIT_GAP_X))
+
+    # Normalize X so leftmost card edge is at MARGIN_X
+    min_left = min(node_x[iid] - CARD_W / 2.0 for iid in ind_ids)
+    shift_x = MARGIN_X - min_left
+    max_right = 0.0
+
     nodes_pos: dict[str, dict[str, Any]] = {}
+    generations_meta: list[dict[str, Any]] = []
+    focal_rank = rank.get(focal_id) if focal_id else None
 
     for row_idx, r in enumerate(sorted_ranks):
-        row = layers[r]
-        row_width = (len(row) - 1) * NODE_GAP_X
-        start_x = (canvas_w - row_width) / 2.0
-        y = 90 + row_idx * LAYER_GAP_Y
-        for col_idx, iid in enumerate(row):
-            nodes_pos[iid] = {
-                "x": round(start_x + col_idx * NODE_GAP_X, 1),
-                "y": round(float(y), 1),
-                "generation": r,
-            }
+        y = float(MARGIN_Y + row_idx * LAYER_GAP_Y)
+        label = (
+            _generation_label(focal_rank - r)
+            if focal_rank is not None
+            else f"Gen {row_idx + 1}"
+        )
+        generations_meta.append({"generation": r, "y": round(y, 1), "label": label})
+        for unit in row_units[r]:
+            for iid in unit:
+                x = round(node_x[iid] + shift_x, 1)
+                max_right = max(max_right, x + CARD_W / 2.0)
+                nodes_pos[iid] = {
+                    "x": x,
+                    "y": round(y, 1),
+                    "generation": r,
+                }
 
-    canvas_h = max(560, 140 + len(sorted_ranks) * LAYER_GAP_Y)
+    canvas_w = round(max(960.0, max_right + MARGIN_X), 1)
+    canvas_h = round(max(560.0, MARGIN_Y + max(0, len(sorted_ranks) - 1) * LAYER_GAP_Y + 120.0), 1)
 
-    # Step 5: Build Marriage / Family Hubs for clean multi-child & inosculated routing
-    # Group children by parent tuple, seeded with marriage relationships
+    # Step 6: Build Marriage / Family Hubs (inline between adjacent couples, staggered bus lanes for children)
     hub_map: dict[tuple[str, ...], dict[str, Any]] = {}
     for rel in ds.relationships:
         if rel.type == "marriage" and rel.person_1 in nodes_pos and rel.person_2 in nodes_pos:
@@ -220,7 +518,6 @@ def _compute_dag_layout(
         if cid not in hub["children"]:
             hub["children"].append(cid)
 
-    # Map parent_child confidence/subtype lookup
     pc_meta: dict[tuple[str, str], dict[str, Any]] = {}
     for rel in ds.relationships:
         if rel.type == "parent_child":
@@ -233,31 +530,95 @@ def _compute_dag_layout(
 
     hubs: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    placed_below_hubs: list[tuple[float, float]] = []
 
     for idx, (_key, hdata) in enumerate(sorted(hub_map.items())):
         hid = f"HUB-{idx + 1}"
-        ps = hdata["parents"]
+        ps = sorted(hdata["parents"], key=lambda p: nodes_pos[p]["x"])
         xs = [nodes_pos[p]["x"] for p in ps]
         ys = [nodes_pos[p]["y"] for p in ps]
-        hx = round(sum(xs) / len(xs), 1)
-        # Place hub slightly below the lower parent card so marriage lines drop neatly
-        hy = round(max(ys) + CARD_H / 2 + 28, 1)
+
+        is_inline = (
+            len(ps) == 2
+            and abs(ys[0] - ys[1]) < 1.0
+            and abs(xs[1] - xs[0]) <= CARD_W + COUPLE_GAP_X + 8.0
+        )
+
+        if is_inline:
+            hx = round((xs[0] + xs[1]) / 2.0, 1)
+            hy = round(ys[0], 1)
+        elif len(ps) == 1:
+            hx = round(xs[0], 1)
+            hy = round(ys[0] + CARD_H / 2.0 + 18.0, 1)
+        else:
+            hx = round(sum(xs) / len(xs), 1)
+            hy = round(max(ys) + CARD_H / 2.0 + 24.0, 1)
+            # Nudge vertically if colliding with another non-inline hub
+            while any(abs(hx - px) < 42.0 and abs(hy - py) < 20.0 for px, py in placed_below_hubs):
+                hy = round(hy + 18.0, 1)
+            placed_below_hubs.append((hx, hy))
 
         hubs.append(
             {
                 "id": hid,
                 "x": hx,
                 "y": hy,
+                "inline": is_inline,
+                "bus_y": None,
                 "parents": ps,
-                "children": hdata["children"],
+                "children": sorted(hdata["children"], key=lambda c: nodes_pos[c]["x"]),
                 "marriage": hdata["marriage"],
                 "consanguineous": hdata["consanguineous"],
                 "kinship": hdata["kinship"],
             }
         )
 
-        # Parent -> Hub edges
-        m_conf = hdata["marriage"]["confidence"] if hdata["marriage"] else "probable"
+    # Assign non-overlapping horizontal bus_y lanes per vertical corridor between rows
+    corridor_hubs: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for h in hubs:
+        if not h["children"]:
+            continue
+        min_child_gen = min(nodes_pos[c]["generation"] for c in h["children"])
+        corridor_hubs[min_child_gen].append(h)
+
+    for child_gen, ch_list in corridor_hubs.items():
+        # Corridor sits directly above child_gen row
+        child_y = min(nodes_pos[c]["y"] for h in ch_list for c in h["children"] if nodes_pos[c]["generation"] == child_gen)
+        corridor_top = child_y - LAYER_GAP_Y + CARD_H / 2.0 + 24.0
+        corridor_bot = child_y - CARD_H / 2.0 - 22.0
+        corridor_mid = (corridor_top + corridor_bot) / 2.0
+
+        # Interval coloring on horizontal span [min_x, max_x]
+        spans: list[tuple[float, float, dict[str, Any]]] = []
+        for h in ch_list:
+            span_xs = [h["x"]] + [nodes_pos[c]["x"] for c in h["children"]]
+            spans.append((min(span_xs), max(span_xs), h))
+        spans.sort(key=lambda s: (s[0], s[1]))
+
+        lane_ends: list[float] = []
+        hub_lane: list[tuple[dict[str, Any], int]] = []
+        for s_min, s_max, h in spans:
+            assigned = -1
+            for li, end_x in enumerate(lane_ends):
+                if s_min > end_x + 12.0:
+                    assigned = li
+                    lane_ends[li] = s_max
+                    break
+            if assigned == -1:
+                assigned = len(lane_ends)
+                lane_ends.append(s_max)
+            hub_lane.append((h, assigned))
+
+        num_lanes = max(1, len(lane_ends))
+        step = min(14.0, max(6.0, (corridor_bot - corridor_top) / max(1, num_lanes)))
+        for h, lane in hub_lane:
+            by = corridor_mid + (lane - (num_lanes - 1) / 2.0) * step
+            h["bus_y"] = round(max(corridor_top, min(corridor_bot, by)), 1)
+
+    for h in hubs:
+        hid = h["id"]
+        ps = h["parents"]
+        m_conf = h["marriage"]["confidence"] if h["marriage"] else "probable"
         for p in ps:
             edges.append(
                 {
@@ -268,16 +629,17 @@ def _compute_dag_layout(
                     "to_type": "hub",
                     "to": hid,
                     "confidence": m_conf,
-                    "consanguineous": hdata["consanguineous"],
+                    "consanguineous": h["consanguineous"],
                 }
             )
-
-        # Hub -> Child edges
-        for c in hdata["children"]:
-            # Determine strongest confidence across parents of this hub for child c
+        for c in h["children"]:
             metas = [pc_meta.get((p, c)) for p in ps if (p, c) in pc_meta]
             conf_order = {"proven": 0, "probable": 1, "speculative": 2}
-            best_conf = min((m["confidence"] for m in metas), key=lambda x: conf_order.get(x, 2), default="probable")
+            best_conf = min(
+                (m["confidence"] for m in metas),
+                key=lambda x: conf_order.get(x, 2),
+                default="probable",
+            )
             subtype = next((m["subtype"] for m in metas if m["subtype"] != "biological"), "biological")
             edges.append(
                 {
@@ -314,6 +676,7 @@ def _compute_dag_layout(
         "nodes": nodes_pos,
         "hubs": hubs,
         "edges": edges,
+        "generations": generations_meta,
         "width": canvas_w,
         "height": canvas_h,
         "card_w": CARD_W,
@@ -903,14 +1266,53 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
       text-decoration: underline;
     }
 
-    /* SVG Graph Nodes & Edges */
-    .node-group { cursor: pointer; }
+    /* SVG Graph Nodes, Bands, Branches & Hover Focus */
+    .gen-band-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 6; opacity: 0.45; }
+    .gen-band-label {
+      font-size: 11px;
+      font-weight: 600;
+      fill: var(--muted);
+      opacity: 0.72;
+      user-select: none;
+    }
+
+    .node-group {
+      cursor: pointer;
+      transition: opacity 220ms ease-in;
+    }
+    .node-inner {
+      transform-origin: 108px 41px;
+      transform: scale(1);
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .node-inner {
+        transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+    }
+    svg#graph.compact-collateral .node-group.non-direct .node-inner {
+      transform: scale(0.82);
+    }
+    svg#graph.compact-collateral .node-group.non-direct:hover .node-inner,
+    svg#graph.compact-collateral .node-group.non-direct:focus-within .node-inner,
+    svg#graph.compact-collateral .node-group.non-direct.selected .node-inner,
+    svg#graph.compact-collateral .node-group.non-direct.compare-target .node-inner {
+      transform: scale(1);
+    }
+    .node-group:focus-visible { outline: none; }
+    .node-group:focus-visible .node-card {
+      stroke: var(--accent);
+      stroke-width: 3;
+      stroke-dasharray: none;
+    }
     .node-card {
       fill: var(--surface);
       stroke: var(--border);
       stroke-width: 1.6;
       rx: 10;
-      transition: stroke 120ms ease, stroke-width 120ms ease;
+      transition: stroke 140ms ease, stroke-width 140ms ease, filter 140ms ease;
+    }
+    .node-group:hover .node-card {
+      filter: drop-shadow(0 3px 8px rgb(0 0 0 / 0.14));
     }
     .node-group.status-confirmed .node-card { stroke: var(--confirmed); }
     .node-group.status-tentative .node-card { stroke: var(--tentative); stroke-dasharray: 5 3; }
@@ -925,6 +1327,86 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     .node-name { font-size: 13px; font-weight: 700; fill: var(--text); }
     .node-dates { font-size: 11px; fill: var(--muted); }
     .node-id { font-size: 9.5px; fill: var(--muted); font-family: ui-monospace, monospace; }
+
+    .branch-toggle {
+      cursor: pointer;
+      opacity: 0.78;
+      transition: opacity 150ms ease;
+    }
+    .node-group:hover .branch-toggle,
+    .node-group:focus-within .branch-toggle,
+    .branch-toggle.is-collapsed {
+      opacity: 1;
+    }
+    @media (hover: none) {
+      .branch-toggle { opacity: 1; }
+    }
+    .branch-toggle rect {
+      fill: var(--surface);
+      stroke: var(--border);
+      stroke-width: 1.5;
+      rx: 10;
+      transition: fill 140ms ease, stroke 140ms ease;
+    }
+    .branch-toggle:hover rect {
+      stroke: var(--accent);
+      fill: var(--surface-alt);
+    }
+    .branch-toggle.is-collapsed rect {
+      fill: var(--accent);
+      stroke: var(--accent);
+    }
+    .branch-toggle text {
+      font-size: 10px;
+      font-weight: 700;
+      fill: var(--muted);
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .branch-toggle:hover text { fill: var(--accent); }
+    .branch-toggle.is-collapsed text { fill: #fff; }
+    .branch-toggle:focus-visible { outline: none; }
+    .branch-toggle:focus-visible rect { stroke: CanvasText; stroke-width: 2.2; }
+
+    .collateral-toggle {
+      cursor: pointer;
+      opacity: 0.72;
+      transition: opacity 150ms ease;
+    }
+    .hub-group:hover .collateral-toggle,
+    .hub-group:focus-within .collateral-toggle,
+    .collateral-toggle.is-collapsed {
+      opacity: 1;
+    }
+    @media (hover: none) {
+      .collateral-toggle { opacity: 1; }
+    }
+    .collateral-toggle rect {
+      fill: var(--surface);
+      stroke: var(--border);
+      stroke-width: 1.4;
+      rx: 9;
+      transition: fill 140ms ease, stroke 140ms ease;
+    }
+    .collateral-toggle:hover rect {
+      stroke: var(--collapse);
+      fill: var(--surface-alt);
+    }
+    .collateral-toggle.is-collapsed rect {
+      fill: var(--collapse);
+      stroke: var(--collapse);
+    }
+    .collateral-toggle text {
+      font-size: 9.5px;
+      font-weight: 700;
+      fill: var(--muted);
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .collateral-toggle:hover text { fill: var(--collapse); }
+    .collateral-toggle.is-collapsed text { fill: #fff; }
+    .collateral-toggle:focus-visible { outline: none; }
+    .collateral-toggle:focus-visible rect { stroke: CanvasText; stroke-width: 2.2; }
 
     .badge-collapse rect { fill: var(--collapse); rx: 8; }
     .badge-collapse text { fill: #fff; font-size: 10px; font-weight: 700; }
@@ -987,17 +1469,27 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
       border: 0;
     }
     @media (prefers-reduced-motion: reduce) {
-      .node-card, .copy-tip { transition: none; }
+      .node-card, .copy-tip, .branch-toggle, .branch-toggle rect, .collateral-toggle, .collateral-toggle rect { transition: none; }
+      .node-group, .hub-group, .edge-path { transition-duration: 80ms; }
     }
 
-    .hub-group { cursor: pointer; }
+    .hub-group {
+      cursor: pointer;
+      transition: opacity 220ms ease-in;
+    }
     .hub-diamond { fill: var(--surface); stroke: var(--muted); stroke-width: 1.8; }
     .hub-group.consang .hub-diamond { fill: var(--consang); stroke: var(--consang); }
     .hub-group.selected .hub-diamond { stroke: var(--accent); stroke-width: 3; }
     .hub-label { font-size: 10px; fill: var(--muted); text-anchor: middle; }
     .hub-group.consang .hub-label { fill: var(--consang); font-weight: 700; }
 
-    .edge-path { fill: none; stroke: var(--muted); stroke-width: 1.7; opacity: 0.72; }
+    .edge-path {
+      fill: none;
+      stroke: var(--muted);
+      stroke-width: 1.7;
+      opacity: 0.72;
+      transition: opacity 220ms ease-in, stroke-width 160ms ease;
+    }
     .edge-path.proven { stroke: var(--confirmed); opacity: 0.85; }
     .edge-path.probable { stroke-dasharray: 6 3; }
     .edge-path.speculative { stroke-dasharray: 2 3; }
@@ -1005,6 +1497,14 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     .edge-path.consang { stroke: var(--consang); stroke-width: 2.2; opacity: 0.9; }
     .edge-path.highlighted { stroke: var(--collapse); stroke-width: 3.2; stroke-dasharray: none; opacity: 1; }
     .edge-path.dimmed { opacity: 0.12; }
+
+    /* Hover focus spotlight: direct family stays at 100%, others ease smoothly to subtle transparency */
+    svg#graph.hover-focus-active .node-group:not(.hover-focus):not(.dimmed) { opacity: 0.28; }
+    svg#graph.hover-focus-active .node-group.hover-focus { opacity: 1; }
+    svg#graph.hover-focus-active .hub-group:not(.hover-focus) { opacity: 0.22; }
+    svg#graph.hover-focus-active .hub-group.hover-focus { opacity: 1; }
+    svg#graph.hover-focus-active .edge-path:not(.hover-focus):not(.dimmed) { opacity: 0.14; }
+    svg#graph.hover-focus-active .edge-path.hover-focus { opacity: 1; stroke-width: 2.4; }
 
     /* Native Modal Dialog per modern-web-guidance */
     dialog#artifact-dialog {
@@ -1085,6 +1585,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <label class="toggle"><input id="toggle-fan" type="checkbox" checked> FAN Club</label>
     <label class="toggle"><input id="toggle-consang" type="checkbox" checked> Inosculation</label>
+    <label class="toggle" title="Render non-direct ancestors of the focal person smaller until hovered or selected"><input id="toggle-compact-collateral" type="checkbox" checked> Compact Collaterals</label>
     <label class="toggle"><input id="toggle-excluded" type="checkbox"> Excluded</label>
     <label class="toggle"><input id="toggle-redact" type="checkbox" checked> Redact Living</label>
     <button id="btn-export-svg" type="button" title="Download current family chart as SVG">Export SVG</button>
@@ -1102,6 +1603,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <svg id="graph" xmlns="http://www.w3.org/2000/svg">
         <g id="viewport">
+          <g id="layer-bands"></g>
           <g id="layer-edges"></g>
           <g id="layer-hubs"></g>
           <g id="layer-nodes"></g>
@@ -1111,6 +1613,8 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
         <button id="btn-zoom-in" type="button" aria-label="Zoom in">+</button>
         <button id="btn-zoom-out" type="button" aria-label="Zoom out">&minus;</button>
         <button id="btn-fit" type="button">Fit View</button>
+        <button id="btn-collapse-collaterals" type="button" title="Collapse all collateral branches (keep direct ancestral line)">Hide Collaterals</button>
+        <button id="btn-expand-all" type="button" hidden>Expand All</button>
         <button id="btn-clear-sel" type="button">Clear Selection</button>
       </div>
     </section>
@@ -1133,6 +1637,11 @@ const INITIAL_DATA = __INITIAL_JSON__;
 
 const state = {
   data: INITIAL_DATA,
+  activeLayout: INITIAL_DATA ? INITIAL_DATA.layout : null,
+  collapsedAncestors: new Set(),
+  collapsedCollaterals: new Set(),
+  rowOffsets: {},
+  rowAlignments: {}, // canonical server generation -> child individual ID whose parents are aligned over them
   selectedId: null,
   selectedHubId: null,
   compareMode: false,
@@ -1140,6 +1649,7 @@ const state = {
   kinshipResult: null,
   showFan: true,
   showConsang: true,
+  compactCollateral: true,
   showExcluded: false,
   redactLiving: INITIAL_DATA ? !!INITIAL_DATA.meta.redact_living : true,
   focusMode: "all",
@@ -1351,7 +1861,74 @@ async function fetchKinship(a, b) {
   return computeKinshipClient(state.data, a, b);
 }
 
-function getVisibleIds() {
+let _familyIndexCache = { data: null, idx: null };
+
+function getFamilyIndex() {
+  if (_familyIndexCache.data === state.data && _familyIndexCache.idx) return _familyIndexCache.idx;
+  const parentsOf = {};
+  const childrenOf = {};
+  const spousesOf = {};
+  const partnersOf = {};
+  const siblingsOf = {};
+  const marriageDates = {};
+  const inds = state.data.individuals || {};
+
+  const pushUnique = (map, k, v) => {
+    const arr = (map[k] ||= []);
+    if (!arr.includes(v)) arr.push(v);
+  };
+
+  for (const r of (state.data.relationships || [])) {
+    if (!inds[r.person_1] || !inds[r.person_2]) continue;
+    if (r.type === "parent_child") {
+      pushUnique(parentsOf, r.person_2, r.person_1);
+      pushUnique(childrenOf, r.person_1, r.person_2);
+    } else if (r.type === "marriage") {
+      pushUnique(spousesOf, r.person_1, r.person_2);
+      pushUnique(spousesOf, r.person_2, r.person_1);
+      pushUnique(partnersOf, r.person_1, r.person_2);
+      pushUnique(partnersOf, r.person_2, r.person_1);
+      if (r.date) {
+        const key = [r.person_1, r.person_2].sort().join("|");
+        marriageDates[key] = r.date;
+      }
+    } else if (r.type === "sibling") {
+      pushUnique(siblingsOf, r.person_1, r.person_2);
+      pushUnique(siblingsOf, r.person_2, r.person_1);
+    }
+  }
+  for (const ps of Object.values(parentsOf)) {
+    if (ps.length >= 2) {
+      for (let i = 0; i < ps.length; i++) {
+        for (let j = i + 1; j < ps.length; j++) {
+          pushUnique(partnersOf, ps[i], ps[j]);
+          pushUnique(partnersOf, ps[j], ps[i]);
+        }
+      }
+    }
+  }
+  const idx = { parentsOf, childrenOf, spousesOf, partnersOf, siblingsOf, marriageDates };
+  _familyIndexCache = { data: state.data, idx };
+  return idx;
+}
+
+function countAncestorsIn(iid, allowedSet, idx) {
+  const seen = new Set();
+  const q = [...(idx.parentsOf[iid] || [])].filter(p => allowedSet.has(p));
+  for (const p of q) seen.add(p);
+  while (q.length) {
+    const cur = q.shift();
+    for (const p of (idx.parentsOf[cur] || [])) {
+      if (allowedSet.has(p) && !seen.has(p)) {
+        seen.add(p);
+        q.push(p);
+      }
+    }
+  }
+  return seen.size;
+}
+
+function getBaseVisibleIds() {
   const inds = state.data.individuals;
   let visible = new Set(Object.keys(inds).filter(id => state.showExcluded || inds[id].status !== "excluded"));
 
@@ -1373,6 +1950,837 @@ function getVisibleIds() {
     visible = keep;
   }
   return visible;
+}
+
+function hubKeyOf(hub) {
+  return [...(hub.parents || [])].sort().join("|");
+}
+
+function getDirectAncestors(baseVisible) {
+  const idx = getFamilyIndex();
+  const data = state.data;
+  const serverNodes = data.layout?.nodes || {};
+  const indsMap = data.individuals || {};
+  let focalForPedigree = data.meta?.focal_person_id;
+  if (!focalForPedigree || !indsMap[focalForPedigree] || (baseVisible && !baseVisible.has(focalForPedigree))) {
+    let bestId = null, bestGen = -Infinity, bestX = Infinity;
+    const pool = baseVisible ? [...baseVisible] : Object.keys(indsMap);
+    for (const iid of pool) {
+      const p = serverNodes[iid];
+      if (!p) continue;
+      if (p.generation > bestGen || (p.generation === bestGen && p.x < bestX)) {
+        bestGen = p.generation;
+        bestX = p.x;
+        bestId = iid;
+      }
+    }
+    focalForPedigree = bestId;
+  }
+  const direct = new Set();
+  if (focalForPedigree) {
+    direct.add(focalForPedigree);
+    const dq = [focalForPedigree];
+    while (dq.length) {
+      const cur = dq.shift();
+      for (const p of (idx.parentsOf[cur] || [])) {
+        if (!direct.has(p) && (!baseVisible || baseVisible.has(p))) {
+          direct.add(p);
+          dq.push(p);
+        }
+      }
+    }
+  }
+  return direct;
+}
+
+function isChildBlockedByCollateralCollapse(parentId, childId, directSet, idx) {
+  if (!state.collapsedCollaterals.size || directSet.has(childId)) return false;
+  // Check if the child's parent-set hub (containing parentId) is collapsed
+  const cParents = (idx.parentsOf[childId] || []).slice().sort();
+  if (!cParents.includes(parentId)) return false;
+  if (state.collapsedCollaterals.has(cParents.join("|"))) return true;
+  if (state.collapsedCollaterals.has(parentId)) return true;
+  return false;
+}
+
+function getVisibleIds(baseVisibleOpt, directSetOpt) {
+  const baseVisible = baseVisibleOpt || getBaseVisibleIds();
+  if (!state.collapsedAncestors.size && !state.collapsedCollaterals.size) return baseVisible;
+
+  const idx = getFamilyIndex();
+  const directSet = directSetOpt || getDirectAncestors(baseVisible);
+  const focalId = state.data.meta?.focal_person_id;
+
+  // Partition baseVisible into connected components over family edges
+  const visitedComp = new Set();
+  const components = [];
+  for (const id of [...baseVisible].sort()) {
+    if (visitedComp.has(id)) continue;
+    const comp = [];
+    const q = [id];
+    visitedComp.add(id);
+    while (q.length) {
+      const u = q.shift();
+      comp.push(u);
+      const nbs = [
+        ...(idx.parentsOf[u] || []),
+        ...(idx.childrenOf[u] || []),
+        ...(idx.partnersOf[u] || []),
+        ...(idx.siblingsOf[u] || []),
+      ];
+      for (const nb of nbs) {
+        if (baseVisible.has(nb) && !visitedComp.has(nb)) {
+          visitedComp.add(nb);
+          q.push(nb);
+        }
+      }
+    }
+    components.push(comp);
+  }
+
+  // Walk each component from its primary anchor respecting collapsedAncestors (up) and collapsedCollaterals (down)
+  const kept = new Set();
+  for (const comp of components) {
+    const compSet = new Set(comp);
+    let anchor = null;
+    if (state.selectedId && state.focusMode !== "all" && compSet.has(state.selectedId)) {
+      anchor = state.selectedId;
+    } else if (focalId && compSet.has(focalId)) {
+      anchor = focalId;
+    } else {
+      const sinks = comp.filter(u => !(idx.childrenOf[u] || []).some(c => compSet.has(c)));
+      const cands = sinks.length ? sinks : comp;
+      cands.sort((a, b) => {
+        const ga = state.data.layout?.nodes?.[a]?.generation ?? 0;
+        const gb = state.data.layout?.nodes?.[b]?.generation ?? 0;
+        if (gb !== ga) return gb - ga;
+        return a.localeCompare(b);
+      });
+      anchor = cands[0];
+    }
+
+    const q = [anchor];
+    kept.add(anchor);
+    while (q.length) {
+      const u = q.shift();
+      // Always traverse to partners (spouses / co-parents)
+      for (const s of (idx.partnersOf[u] || [])) {
+        if (compSet.has(s) && !kept.has(s)) { kept.add(s); q.push(s); }
+      }
+      // Traverse downward to children unless blocked by collapsedCollaterals (or child collapsed upward)
+      for (const c of (idx.childrenOf[u] || [])) {
+        if (
+          compSet.has(c) &&
+          !kept.has(c) &&
+          !state.collapsedAncestors.has(c) &&
+          !isChildBlockedByCollateralCollapse(u, c, directSet, idx)
+        ) {
+          kept.add(c);
+          q.push(c);
+        }
+      }
+      // Traverse upward to parents ONLY if u's ancestors are not collapsed
+      if (!state.collapsedAncestors.has(u)) {
+        for (const p of (idx.parentsOf[u] || [])) {
+          if (compSet.has(p) && !kept.has(p)) { kept.add(p); q.push(p); }
+        }
+      }
+    }
+  }
+  return kept;
+}
+
+function pavaPlaceRow(widths, targets, gap) {
+  const n = widths.length;
+  if (!n) return [];
+  const offsets = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    offsets[i] = offsets[i - 1] + (widths[i - 1] + widths[i]) / 2 + gap;
+  }
+  const blocks = [];
+  for (let i = 0; i < n; i++) {
+    blocks.push([targets[i] - offsets[i], 1, i, i]);
+    while (blocks.length >= 2) {
+      const prev = blocks[blocks.length - 2];
+      const curr = blocks[blocks.length - 1];
+      if (prev[0] / prev[1] > curr[0] / curr[1]) {
+        prev[0] += curr[0];
+        prev[1] += curr[1];
+        prev[3] = curr[3];
+        blocks.pop();
+      } else break;
+    }
+  }
+  const centers = new Array(n).fill(0);
+  for (const [sumZ, count, s, e] of blocks) {
+    const val = sumZ / count;
+    for (let i = s; i <= e; i++) centers[i] = val + offsets[i];
+  }
+  return centers;
+}
+
+function generationLabelClient(delta) {
+  if (delta === 0) return "Focal / Self";
+  if (delta === 1) return "Parents (+1)";
+  if (delta === 2) return "Grandparents (+2)";
+  if (delta === 3) return "Great-Grandparents (+3)";
+  if (delta > 3) return `${delta - 2}× Great-Grandparents (+${delta})`;
+  if (delta === -1) return "Children (-1)";
+  if (delta === -2) return "Grandchildren (-2)";
+  return `${-delta - 2}× Great-Grandchildren (${delta})`;
+}
+
+function computeClientLayout(visible) {
+  const serverLayout = state.data.layout;
+  const allCount = Object.keys(state.data.individuals || {}).length;
+  if (!state.collapsedAncestors.size && !state.collapsedCollaterals.size && state.focusMode === "all" && visible.size === allCount) {
+    return serverLayout;
+  }
+
+  const cw = serverLayout.card_w || 216;
+  const ch = serverLayout.card_h || 82;
+  const LAYER_GAP_Y = 176;
+  const COUPLE_GAP_X = 28;
+  const UNIT_GAP_X = 56;
+  const MARGIN_X = 140;
+  const MARGIN_Y = 92;
+
+  const visIds = [...visible].sort();
+  if (!visIds.length) {
+    return { nodes: {}, hubs: [], edges: [], generations: [], width: 800, height: 500, card_w: cw, card_h: ch };
+  }
+
+  const inds = state.data.individuals;
+  const idx = getFamilyIndex();
+  const parentsOf = {};
+  const childrenOf = {};
+  const spousesOf = {};
+  const partnersOf = {};
+  for (const u of visIds) {
+    parentsOf[u] = state.collapsedAncestors.has(u)
+      ? []
+      : (idx.parentsOf[u] || []).filter(p => visible.has(p));
+    childrenOf[u] = (idx.childrenOf[u] || []).filter(c => visible.has(c) && !state.collapsedAncestors.has(c));
+    spousesOf[u] = (idx.spousesOf[u] || []).filter(s => visible.has(s));
+    partnersOf[u] = (idx.partnersOf[u] || []).filter(s => visible.has(s));
+  }
+
+  const serverX = (id) => (typeof serverLayout.nodes?.[id]?.x === "number" ? serverLayout.nodes[id].x : 0);
+
+  // Reuse server generation ranks (already globally consistent!) and re-normalize to 0..k
+  const rawRanks = {};
+  let minR = Infinity;
+  for (const u of visIds) {
+    const r = serverLayout.nodes?.[u]?.generation ?? 0;
+    rawRanks[u] = r;
+    if (r < minR) minR = r;
+  }
+  const rank = {};
+  const layers = {};
+  for (const u of visIds) {
+    const r = rawRanks[u] - minR;
+    rank[u] = r;
+    (layers[r] ||= []).push(u);
+  }
+  const sortedRanks = Object.keys(layers).map(Number).sort((a, b) => a - b);
+
+  // Form atomic couple units per layer (using redaction-invariant serverX ordering)
+  const rowUnits = {};
+  for (const r of sortedRanks) {
+    const rowSet = new Set(layers[r]);
+    const sameRowPartners = {};
+    for (const u of layers[r]) {
+      const married = spousesOf[u].filter(s => rowSet.has(s));
+      const other = partnersOf[u].filter(s => rowSet.has(s) && !married.includes(s));
+      married.sort((a, b) => {
+        const ka = [u, a].sort().join("|"), kb = [u, b].sort().join("|");
+        return (idx.marriageDates[ka] || "9999").localeCompare(idx.marriageDates[kb] || "9999") || serverX(a) - serverX(b);
+      });
+      sameRowPartners[u] = [...married, ...other];
+    }
+    const used = new Set();
+    const units = [];
+    const ordered = [...layers[r]].sort((a, b) =>
+      (sameRowPartners[b].length - sameRowPartners[a].length) || (serverX(a) - serverX(b)) || a.localeCompare(b)
+    );
+    for (const u of ordered) {
+      if (used.has(u)) continue;
+      const ps = sameRowPartners[u].filter(p => !used.has(p));
+      if (!ps.length) {
+        used.add(u);
+        units.push([u]);
+      } else if (ps.length === 1) {
+        const v = ps[0];
+        used.add(u); used.add(v);
+        const pair = [u, v].sort((a, b) => serverX(a) - serverX(b) || a.localeCompare(b));
+        units.push(pair);
+      } else {
+        used.add(u); used.add(ps[0]); used.add(ps[1]);
+        units.push([ps[0], u, ps[1]]);
+      }
+    }
+    units.sort((a, b) => Math.min(...a.map(serverX)) - Math.min(...b.map(serverX)) || a[0].localeCompare(b[0]));
+    rowUnits[r] = units;
+  }
+
+  // Barycenter sweeps
+  const nodeIndex = () => {
+    const pos = {};
+    for (const r of sortedRanks) {
+      let cur = 0;
+      for (const unit of rowUnits[r]) {
+        for (const id of unit) { pos[id] = cur; cur += 1; }
+        cur += 0.5;
+      }
+    }
+    return pos;
+  };
+
+  for (let pass = 0; pass < 6; pass++) {
+    let pos = nodeIndex();
+    for (let i = 1; i < sortedRanks.length; i++) {
+      const r = sortedRanks[i];
+      const scored = rowUnits[r].map(unit => {
+        if (unit.length === 2) {
+          const [a, b] = unit;
+          const pa = parentsOf[a].filter(p => p in pos).map(p => pos[p]);
+          const pb = parentsOf[b].filter(p => p in pos).map(p => pos[p]);
+          if (pa.length && pb.length && (pa.reduce((s, x) => s + x, 0) / pa.length) > (pb.reduce((s, x) => s + x, 0) / pb.length)) {
+            unit = [b, a];
+          }
+        }
+        const allP = unit.flatMap(m => parentsOf[m].filter(p => p in pos).map(p => pos[p]));
+        const bary = allP.length ? allP.reduce((s, x) => s + x, 0) / allP.length
+                                 : unit.reduce((s, m) => s + pos[m], 0) / unit.length;
+        return { bary, sx: Math.min(...unit.map(serverX)), id: unit[0], unit };
+      });
+      scored.sort((a, b) => a.bary - b.bary || a.sx - b.sx || a.id.localeCompare(b.id));
+      rowUnits[r] = scored.map(s => s.unit);
+    }
+    pos = nodeIndex();
+    for (let i = sortedRanks.length - 2; i >= 0; i--) {
+      const r = sortedRanks[i];
+      const scored = rowUnits[r].map(unit => {
+        const allC = unit.flatMap(m => childrenOf[m].filter(c => c in pos).map(c => pos[c]));
+        const bary = allC.length ? allC.reduce((s, x) => s + x, 0) / allC.length
+                                 : unit.reduce((s, m) => s + pos[m], 0) / unit.length;
+        return { bary, sx: Math.min(...unit.map(serverX)), id: unit[0], unit };
+      });
+      scored.sort((a, b) => a.bary - b.bary || a.sx - b.sx || a.id.localeCompare(b.id));
+      rowUnits[r] = scored.map(s => s.unit);
+    }
+  }
+
+  // PAVA X-alignment
+  const unitWidth = (u) => u.length * cw + (u.length - 1) * COUPLE_GAP_X;
+  const unitCenters = {};
+  const nodeX = {};
+  const syncRow = (r, centers) => {
+    unitCenters[r] = centers;
+    rowUnits[r].forEach((unit, ui) => {
+      const uw = unitWidth(unit);
+      const left = centers[ui] - uw / 2 + cw / 2;
+      unit.forEach((id, mi) => { nodeX[id] = left + mi * (cw + COUPLE_GAP_X); });
+    });
+  };
+  for (const r of sortedRanks) {
+    const widths = rowUnits[r].map(unitWidth);
+    const totalW = widths.reduce((a, b) => a + b, 0) + Math.max(0, widths.length - 1) * UNIT_GAP_X;
+    let cur = -totalW / 2;
+    const centers = widths.map(w => { const c = cur + w / 2; cur += w + UNIT_GAP_X; return c; });
+    syncRow(r, centers);
+  }
+  for (let pass = 0; pass < 8; pass++) {
+    for (const r of sortedRanks) {
+      const units = rowUnits[r];
+      const widths = units.map(unitWidth);
+      const targets = units.map((unit, ui) => {
+        const pXs = unit.flatMap(m => parentsOf[m].filter(p => p in nodeX).map(p => nodeX[p]));
+        const cXs = unit.flatMap(m => childrenOf[m].filter(c => c in nodeX).map(c => nodeX[c]));
+        if (pXs.length && cXs.length) return 0.55 * (pXs.reduce((a, b) => a + b, 0) / pXs.length) + 0.45 * (cXs.reduce((a, b) => a + b, 0) / cXs.length);
+        if (pXs.length) return pXs.reduce((a, b) => a + b, 0) / pXs.length;
+        if (cXs.length) return cXs.reduce((a, b) => a + b, 0) / cXs.length;
+        return unitCenters[r][ui];
+      });
+      syncRow(r, pavaPlaceRow(widths, targets, UNIT_GAP_X));
+    }
+    for (let i = sortedRanks.length - 1; i >= 0; i--) {
+      const r = sortedRanks[i];
+      const units = rowUnits[r];
+      const widths = units.map(unitWidth);
+      const targets = units.map((unit, ui) => {
+        const pXs = unit.flatMap(m => parentsOf[m].filter(p => p in nodeX).map(p => nodeX[p]));
+        const cXs = unit.flatMap(m => childrenOf[m].filter(c => c in nodeX).map(c => nodeX[c]));
+        if (pXs.length && cXs.length) return 0.45 * (pXs.reduce((a, b) => a + b, 0) / pXs.length) + 0.55 * (cXs.reduce((a, b) => a + b, 0) / cXs.length);
+        if (cXs.length) return cXs.reduce((a, b) => a + b, 0) / cXs.length;
+        if (pXs.length) return pXs.reduce((a, b) => a + b, 0) / pXs.length;
+        return unitCenters[r][ui];
+      });
+      syncRow(r, pavaPlaceRow(widths, targets, UNIT_GAP_X));
+    }
+  }
+
+  let minLeft = Infinity;
+  for (const id of visIds) minLeft = Math.min(minLeft, nodeX[id] - cw / 2);
+  const shiftX = MARGIN_X - minLeft;
+  let maxRight = 0;
+
+  const nodesPos = {};
+  const generations = [];
+  const focalId = state.data.meta?.focal_person_id;
+  const focalRank = focalId && focalId in rank ? rank[focalId] : null;
+  sortedRanks.forEach((r, rowIdx) => {
+    const y = Math.round((MARGIN_Y + rowIdx * LAYER_GAP_Y) * 10) / 10;
+    const label = focalRank !== null ? generationLabelClient(focalRank - r) : `Gen ${rowIdx + 1}`;
+    generations.push({ generation: r, y, label });
+    for (const unit of rowUnits[r]) {
+      for (const id of unit) {
+        const x = Math.round((nodeX[id] + shiftX) * 10) / 10;
+        maxRight = Math.max(maxRight, x + cw / 2);
+        nodesPos[id] = { x, y, generation: r };
+      }
+    }
+  });
+
+  // Rebuild visible hubs with inline placement & bus_y lanes
+  const hubs = [];
+  const hubById = new Map();
+  const placedBelow = [];
+  for (const sh of (serverLayout.hubs || [])) {
+    const hKey = hubKeyOf(sh);
+    const visParents = sh.parents.filter(p => visible.has(p)).sort((a, b) => nodesPos[a].x - nodesPos[b].x);
+    const visChildren = sh.children.filter(c => visible.has(c) && !state.collapsedAncestors.has(c)).sort((a, b) => nodesPos[a].x - nodesPos[b].x);
+    if (!visParents.length || (!sh.marriage && !visChildren.length && !state.collapsedCollaterals.has(hKey))) continue;
+    const xs = visParents.map(p => nodesPos[p].x);
+    const ys = visParents.map(p => nodesPos[p].y);
+    const isInline = visParents.length === 2 && Math.abs(ys[0] - ys[1]) < 1 && Math.abs(xs[1] - xs[0]) <= cw + COUPLE_GAP_X + 8;
+    let hx, hy;
+    if (isInline) {
+      hx = Math.round(((xs[0] + xs[1]) / 2) * 10) / 10;
+      hy = ys[0];
+    } else if (visParents.length === 1) {
+      hx = xs[0];
+      hy = Math.round((ys[0] + ch / 2 + 18) * 10) / 10;
+    } else {
+      hx = Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10;
+      hy = Math.round((Math.max(...ys) + ch / 2 + 24) * 10) / 10;
+      while (placedBelow.some(([px, py]) => Math.abs(hx - px) < 42 && Math.abs(hy - py) < 20)) hy += 18;
+      placedBelow.push([hx, hy]);
+    }
+    const hObj = { ...sh, x: hx, y: hy, inline: isInline, bus_y: null, parents: visParents, children: visChildren };
+    hubs.push(hObj);
+    hubById.set(hObj.id, hObj);
+  }
+
+  // Assign non-overlapping bus_y per corridor
+  const corrMap = {};
+  for (const h of hubs) {
+    if (!h.children.length) continue;
+    const minGen = Math.min(...h.children.map(c => nodesPos[c].generation));
+    (corrMap[minGen] ||= []).push(h);
+  }
+  for (const [cgStr, chList] of Object.entries(corrMap)) {
+    const cg = Number(cgStr);
+    const childY = Math.min(...chList.flatMap(h => h.children.filter(c => nodesPos[c].generation === cg).map(c => nodesPos[c].y)));
+    const corrTop = childY - LAYER_GAP_Y + ch / 2 + 24;
+    const corrBot = childY - ch / 2 - 22;
+    const corrMid = (corrTop + corrBot) / 2;
+    const spans = chList.map(h => {
+      const xs = [h.x, ...h.children.map(c => nodesPos[c].x)];
+      return { minX: Math.min(...xs), maxX: Math.max(...xs), h };
+    }).sort((a, b) => a.minX - b.minX || a.maxX - b.maxX);
+    const laneEnds = [];
+    const assigned = [];
+    for (const sp of spans) {
+      let li = laneEnds.findIndex(endX => sp.minX > endX + 12);
+      if (li === -1) { li = laneEnds.length; laneEnds.push(sp.maxX); }
+      else laneEnds[li] = sp.maxX;
+      assigned.push([sp.h, li]);
+    }
+    const numLanes = Math.max(1, laneEnds.length);
+    const step = Math.min(14, Math.max(6, (corrBot - corrTop) / numLanes));
+    for (const [h, li] of assigned) {
+      const by = corrMid + (li - (numLanes - 1) / 2) * step;
+      h.bus_y = Math.round(Math.max(corrTop, Math.min(corrBot, by)) * 10) / 10;
+    }
+  }
+
+  // Filter edges to visible hubs/nodes (and respect collapsed upward edges)
+  const edges = (serverLayout.edges || []).filter(e => {
+    if (e.kind === "spouse_to_hub") return visible.has(e.from) && hubById.has(e.to);
+    if (e.kind === "hub_to_child") return hubById.has(e.from) && visible.has(e.to) && !state.collapsedAncestors.has(e.to);
+    return visible.has(e.from) && visible.has(e.to);
+  });
+
+  return {
+    nodes: nodesPos,
+    hubs,
+    edges,
+    generations,
+    width: Math.round(Math.max(960, maxRight + MARGIN_X) * 10) / 10,
+    height: Math.round(Math.max(560, MARGIN_Y + Math.max(0, sortedRanks.length - 1) * LAYER_GAP_Y + 120) * 10) / 10,
+    card_w: cw,
+    card_h: ch,
+  };
+}
+
+function roundedOrthogonalPath(x1, y1, x2, y2, busY) {
+  if (Math.abs(x1 - x2) < 2) {
+    return `M ${x1} ${y1} L ${x2} ${y2}`;
+  }
+  const midY = (typeof busY === "number" && busY > y1 + 6 && busY < y2 - 6)
+    ? busY
+    : (y1 + y2) / 2;
+  const r = Math.min(9, Math.abs(x2 - x1) / 2, Math.abs(midY - y1) / 2, Math.abs(y2 - midY) / 2);
+  if (r < 2) {
+    return `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
+  }
+  const dir = x2 > x1 ? 1 : -1;
+  return [
+    `M ${x1} ${y1}`,
+    `L ${x1} ${midY - r}`,
+    `Q ${x1} ${midY}, ${x1 + dir * r} ${midY}`,
+    `L ${x2 - dir * r} ${midY}`,
+    `Q ${x2} ${midY}, ${x2} ${midY + r}`,
+    `L ${x2} ${y2}`,
+  ].join(" ");
+}
+
+// Smooth hover-focus spotlight & per-row parent alignment animation
+let _hoverLeaveTimer = null;
+let _hoverAlignTimer = null;
+let _rowAnimFrame = null;
+const HOVER_ALIGN_DELAY_MS = 1800;
+const _renderedRefs = { nodes: new Map(), hubs: new Map(), edges: [], visibleHubs: new Map() };
+
+function getRowOffset(gen) {
+  return state.rowOffsets[gen] || 0;
+}
+
+function getVisualNodePos(layout, iid) {
+  const p = layout.nodes[iid];
+  if (!p) return null;
+  return { x: p.x + getRowOffset(p.generation), y: p.y, generation: p.generation };
+}
+
+function getVisualHubPos(layout, h) {
+  const ps = (h.parents || []).filter(p => layout.nodes[p]);
+  if (!ps.length) return { x: h.x, y: h.y };
+  const gens = ps.map(p => layout.nodes[p].generation);
+  if (gens.every(g => g === gens[0])) {
+    return { x: h.x + getRowOffset(gens[0]), y: h.y };
+  }
+  const avgX = ps.reduce((sum, p) => sum + getVisualNodePos(layout, p).x, 0) / ps.length;
+  return { x: avgX, y: h.y };
+}
+
+function computeEdgePath(layout, edge, visibleHubs) {
+  const cw = layout.card_w;
+  const ch = layout.card_h;
+  if (edge.kind === "spouse_to_hub") {
+    const p = getVisualNodePos(layout, edge.from);
+    const h = visibleHubs.get(edge.to);
+    if (!p || !h) return null;
+    const hp = getVisualHubPos(layout, h);
+    if (h.inline) {
+      const x1 = p.x < hp.x ? p.x + cw / 2 : p.x - cw / 2;
+      return `M ${x1} ${p.y} L ${hp.x} ${hp.y}`;
+    }
+    const x1 = p.x, y1 = p.y + ch / 2;
+    const midY = (y1 + hp.y) / 2;
+    return `M ${x1} ${y1} C ${x1} ${midY}, ${hp.x} ${midY}, ${hp.x} ${hp.y}`;
+  }
+  if (edge.kind === "hub_to_child") {
+    const h = visibleHubs.get(edge.from);
+    const c = getVisualNodePos(layout, edge.to);
+    if (!h || !c) return null;
+    const hp = getVisualHubPos(layout, h);
+    return roundedOrthogonalPath(hp.x, hp.y, c.x, c.y - ch / 2, h.bus_y);
+  }
+  const a = getVisualNodePos(layout, edge.from);
+  const b = getVisualNodePos(layout, edge.to);
+  if (!a || !b) return null;
+  const mx = (a.x + b.x) / 2;
+  const my = Math.min(a.y, b.y) - 44;
+  return `M ${a.x} ${a.y} Q ${mx} ${my}, ${b.x} ${b.y}`;
+}
+
+function applyRowOffsetsToDom() {
+  const layout = state.activeLayout || state.data.layout;
+  if (!layout) return;
+  const cw = layout.card_w;
+  const ch = layout.card_h;
+  for (const [iid, elNode] of _renderedRefs.nodes.entries()) {
+    const vp = getVisualNodePos(layout, iid);
+    if (vp) elNode.setAttribute("transform", `translate(${vp.x - cw / 2}, ${vp.y - ch / 2})`);
+  }
+  for (const [hid, elHub] of _renderedRefs.hubs.entries()) {
+    const h = _renderedRefs.visibleHubs.get(hid);
+    if (!h) continue;
+    const hp = getVisualHubPos(layout, h);
+    elHub.setAttribute("transform", `translate(${hp.x},${hp.y})`);
+  }
+  for (const { edge, el: elEdge } of _renderedRefs.edges) {
+    const dStr = computeEdgePath(layout, edge, _renderedRefs.visibleHubs);
+    if (dStr) elEdge.setAttribute("d", dStr);
+  }
+}
+
+function cancelRowOffsetAnimation() {
+  if (_rowAnimFrame !== null) {
+    cancelAnimationFrame(_rowAnimFrame);
+    _rowAnimFrame = null;
+  }
+}
+
+function cancelHoverAlignTimer() {
+  if (_hoverAlignTimer !== null) {
+    clearTimeout(_hoverAlignTimer);
+    _hoverAlignTimer = null;
+  }
+}
+
+function animateRowOffsetsTo(targetOffsets, durationMs = 420) {
+  cancelRowOffsetAnimation();
+  const keys = new Set([...Object.keys(state.rowOffsets), ...Object.keys(targetOffsets)].map(Number));
+  let maxDelta = 0;
+  for (const g of keys) {
+    maxDelta = Math.max(maxDelta, Math.abs((targetOffsets[g] || 0) - (state.rowOffsets[g] || 0)));
+  }
+  if (maxDelta < 1) return;
+
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion || durationMs <= 0) {
+    state.rowOffsets = { ...targetOffsets };
+    applyRowOffsetsToDom();
+    return;
+  }
+
+  const startOffsets = {};
+  for (const g of keys) startOffsets[g] = state.rowOffsets[g] || 0;
+  const t0 = performance.now();
+
+  const step = (now) => {
+    const raw = Math.min(1, (now - t0) / durationMs);
+    // Cubic ease-in-out
+    const ease = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2;
+    for (const g of keys) {
+      const s = startOffsets[g] || 0;
+      const e = targetOffsets[g] || 0;
+      state.rowOffsets[g] = s + (e - s) * ease;
+    }
+    applyRowOffsetsToDom();
+    if (raw < 1) {
+      _rowAnimFrame = requestAnimationFrame(step);
+    } else {
+      state.rowOffsets = { ...targetOffsets };
+      applyRowOffsetsToDom();
+      _rowAnimFrame = null;
+    }
+  };
+  _rowAnimFrame = requestAnimationFrame(step);
+}
+
+function computeOffsetsFromAlignments(layout, visibleHubs) {
+  const offsets = {};
+  if (!layout || !Object.keys(state.rowAlignments).length) return offsets;
+  const idx = getFamilyIndex();
+
+  // Map child -> visible hub (if any)
+  const childToHub = new Map();
+  for (const h of visibleHubs.values()) {
+    for (const c of (h.children || [])) childToHub.set(c, h);
+  }
+
+  // Collect active alignments and replay bottom-up (highest active generation -> 0)
+  const entries = [];
+  for (const childId of Object.values(state.rowAlignments)) {
+    const pos = layout.nodes?.[childId];
+    if (!pos) continue;
+    if (state.collapsedAncestors.has(childId)) continue;
+    const visParents = (idx.parentsOf[childId] || []).filter(p => layout.nodes?.[p]);
+    if (!visParents.length) continue;
+    entries.push({ gen: pos.generation, childId, visParents });
+  }
+  entries.sort((a, b) => b.gen - a.gen);
+
+  const hubXWithOffsets = (h) => {
+    const ps = (h.parents || []).filter(p => layout.nodes?.[p]);
+    if (!ps.length) return h.x;
+    const gens = ps.map(p => layout.nodes[p].generation);
+    if (gens.every(g => g === gens[0])) return h.x + (offsets[gens[0]] || 0);
+    return ps.reduce((s, p) => s + layout.nodes[p].x + (offsets[layout.nodes[p].generation] || 0), 0) / ps.length;
+  };
+
+  for (const { gen, childId, visParents } of entries) {
+    const childVisualX = layout.nodes[childId].x + (offsets[gen] || 0);
+    const hub = childToHub.get(childId);
+    const parentVisualX = hub
+      ? hubXWithOffsets(hub)
+      : visParents.reduce((s, p) => s + layout.nodes[p].x + (offsets[layout.nodes[p].generation] || 0), 0) / visParents.length;
+    const dx = childVisualX - parentVisualX;
+    if (Math.abs(dx) < 0.5) continue;
+    for (const gMeta of (layout.generations || [])) {
+      if (gMeta.generation < gen) {
+        offsets[gMeta.generation] = (offsets[gMeta.generation] || 0) + dx;
+      }
+    }
+  }
+  return offsets;
+}
+
+function alignParentsOverNode(iid) {
+  const layout = state.activeLayout || state.data.layout;
+  if (!layout || !layout.nodes[iid]) return;
+  const idx = getFamilyIndex();
+  const visParents = (idx.parentsOf[iid] || []).filter(p => layout.nodes[p] && !state.collapsedAncestors.has(iid));
+  if (!visParents.length) return;
+
+  // Record this generation's alignment using canonical server generation (invariant across collapses)
+  const serverGen = state.data.layout?.nodes?.[iid]?.generation ?? layout.nodes[iid].generation;
+  state.rowAlignments[serverGen] = iid;
+
+  const targetOffsets = computeOffsetsFromAlignments(layout, _renderedRefs.visibleHubs);
+  animateRowOffsetsTo(targetOffsets, 420);
+}
+
+function clearHoverFocusImmediate() {
+  cancelHoverAlignTimer();
+  const svg = document.getElementById("graph");
+  if (!svg) return;
+  svg.classList.remove("hover-focus-active");
+  for (const elNode of _renderedRefs.nodes.values()) elNode.classList.remove("hover-focus");
+  for (const elHub of _renderedRefs.hubs.values()) elHub.classList.remove("hover-focus");
+  for (const item of _renderedRefs.edges) item.el.classList.remove("hover-focus");
+}
+
+function scheduleClearHoverFocus() {
+  cancelHoverAlignTimer();
+  clearTimeout(_hoverLeaveTimer);
+  _hoverLeaveTimer = setTimeout(clearHoverFocusImmediate, 65);
+}
+
+function applyHoverFocusForNode(iid, scheduleAlign = false) {
+  clearTimeout(_hoverLeaveTimer);
+  cancelHoverAlignTimer();
+  const idx = getFamilyIndex();
+  const focusNodes = new Set([
+    iid,
+    ...(idx.parentsOf[iid] || []),
+    ...(idx.childrenOf[iid] || []),
+    ...(idx.partnersOf[iid] || []),
+  ]);
+  const focusHubs = new Set();
+  const layout = state.activeLayout || state.data.layout;
+  for (const h of (layout.hubs || [])) {
+    if (h.parents.includes(iid) || h.children.includes(iid)) focusHubs.add(h.id);
+  }
+  const svg = document.getElementById("graph");
+  svg.classList.add("hover-focus-active");
+  for (const [id, elNode] of _renderedRefs.nodes.entries()) {
+    elNode.classList.toggle("hover-focus", focusNodes.has(id));
+  }
+  for (const [hid, elHub] of _renderedRefs.hubs.entries()) {
+    elHub.classList.toggle("hover-focus", focusHubs.has(hid));
+  }
+  for (const { edge, el: elEdge } of _renderedRefs.edges) {
+    let hit = false;
+    if (edge.kind === "spouse_to_hub") {
+      hit = focusHubs.has(edge.to) && focusNodes.has(edge.from);
+    } else if (edge.kind === "hub_to_child") {
+      hit = focusHubs.has(edge.from) && (edge.to === iid || (edge.parents || []).includes(iid));
+    } else {
+      hit = edge.from === iid || edge.to === iid;
+    }
+    elEdge.classList.toggle("hover-focus", hit);
+  }
+  if (scheduleAlign) {
+    _hoverAlignTimer = setTimeout(() => {
+      _hoverAlignTimer = null;
+      alignParentsOverNode(iid);
+    }, HOVER_ALIGN_DELAY_MS);
+  }
+}
+
+function applyHoverFocusForHub(hub) {
+  clearTimeout(_hoverLeaveTimer);
+  cancelHoverAlignTimer();
+  const focusNodes = new Set([...hub.parents, ...hub.children]);
+  const focusHubs = new Set([hub.id]);
+  const svg = document.getElementById("graph");
+  svg.classList.add("hover-focus-active");
+  for (const [id, elNode] of _renderedRefs.nodes.entries()) {
+    elNode.classList.toggle("hover-focus", focusNodes.has(id));
+  }
+  for (const [hid, elHub] of _renderedRefs.hubs.entries()) {
+    elHub.classList.toggle("hover-focus", focusHubs.has(hid));
+  }
+  for (const { edge, el: elEdge } of _renderedRefs.edges) {
+    const hit = (edge.kind === "spouse_to_hub" && edge.to === hub.id)
+             || (edge.kind === "hub_to_child" && edge.from === hub.id);
+    elEdge.classList.toggle("hover-focus", hit);
+  }
+}
+
+function toggleBranchCollapse(iid) {
+  cancelRowOffsetAnimation();
+  cancelHoverAlignTimer();
+  const prevLayout = state.activeLayout || state.data.layout;
+  const prevPos = prevLayout ? getVisualNodePos(prevLayout, iid) : null;
+  const oldScreenX = prevPos ? prevPos.x * state.scale + state.tx : null;
+  const oldScreenY = prevPos ? prevPos.y * state.scale + state.ty : null;
+
+  if (state.collapsedAncestors.has(iid)) state.collapsedAncestors.delete(iid);
+  else state.collapsedAncestors.add(iid);
+
+  renderGraph({ recomputeAlignments: true });
+
+  // Keep the clicked card anchored at its exact screen position so the tree doesn't jump
+  const nextLayout = state.activeLayout || state.data.layout;
+  const nextPos = nextLayout ? getVisualNodePos(nextLayout, iid) : null;
+  if (oldScreenX !== null && nextPos) {
+    state.tx = oldScreenX - nextPos.x * state.scale;
+    state.ty = oldScreenY - nextPos.y * state.scale;
+    applyTransform();
+  }
+}
+
+function toggleHubCollaterals(hubKey, hubId) {
+  cancelRowOffsetAnimation();
+  cancelHoverAlignTimer();
+  const prevLayout = state.activeLayout || state.data.layout;
+  const prevHub = _renderedRefs.visibleHubs.get(hubId);
+  const prevPos = prevLayout && prevHub ? getVisualHubPos(prevLayout, prevHub) : null;
+  const oldScreenX = prevPos ? prevPos.x * state.scale + state.tx : null;
+  const oldScreenY = prevPos ? prevPos.y * state.scale + state.ty : null;
+
+  if (state.collapsedCollaterals.has(hubKey)) state.collapsedCollaterals.delete(hubKey);
+  else state.collapsedCollaterals.add(hubKey);
+
+  renderGraph({ recomputeAlignments: true });
+
+  // Keep the clicked marriage hub pinned to its exact screen position
+  const nextHub = _renderedRefs.visibleHubs.get(hubId);
+  const nextLayout = state.activeLayout || state.data.layout;
+  const nextPos = nextLayout && nextHub ? getVisualHubPos(nextLayout, nextHub) : null;
+  if (oldScreenX !== null && nextPos) {
+    state.tx = oldScreenX - nextPos.x * state.scale;
+    state.ty = oldScreenY - nextPos.y * state.scale;
+    applyTransform();
+  }
+}
+
+function collapseAllCollaterals() {
+  cancelRowOffsetAnimation();
+  cancelHoverAlignTimer();
+  const baseVisible = getBaseVisibleIds();
+  const directSet = getDirectAncestors(baseVisible);
+  for (const sh of (state.data.layout?.hubs || [])) {
+    const hasCollateral = (sh.children || []).some(c => baseVisible.has(c) && !directSet.has(c));
+    if (hasCollateral) state.collapsedCollaterals.add(hubKeyOf(sh));
+  }
+  renderGraph({ recomputeAlignments: true });
+  fitToView({ preserveAlignments: true });
 }
 
 function getSearchMatches() {
@@ -1453,10 +2861,15 @@ function getPlaceMatchSet() {
   return pl ? new Set((pl.individuals || []).map(i => i.id)) : new Set();
 }
 
-function renderGraph() {
+function renderGraph({ recomputeAlignments = false } = {}) {
   const data = state.data;
-  const layout = data.layout;
-  const visible = getVisibleIds();
+  const idx = getFamilyIndex();
+  const baseVisible = getBaseVisibleIds();
+  const directAncestors = getDirectAncestors(baseVisible);
+  const visible = getVisibleIds(baseVisible, directAncestors);
+  const layout = computeClientLayout(visible);
+  state.activeLayout = layout;
+
   const searchMatches = getSearchMatches();
   const tractMatches = getTractMatchSet();
   const placeMatches = getPlaceMatchSet();
@@ -1465,9 +2878,16 @@ function renderGraph() {
   const { pathNodes, pathPairs, multiPathBadges } = getHighlightedSets();
   const hasHighlight = pathNodes.size > 0;
 
+  clearHoverFocusImmediate();
+  _renderedRefs.nodes.clear();
+  _renderedRefs.hubs.clear();
+  _renderedRefs.edges = [];
+
+  const layerBands = document.getElementById("layer-bands");
   const layerEdges = document.getElementById("layer-edges");
   const layerHubs = document.getElementById("layer-hubs");
   const layerNodes = document.getElementById("layer-nodes");
+  layerBands.replaceChildren();
   layerEdges.replaceChildren();
   layerHubs.replaceChildren();
   layerNodes.replaceChildren();
@@ -1475,51 +2895,65 @@ function renderGraph() {
   const cw = layout.card_w;
   const ch = layout.card_h;
 
+  // Subtle generation row guide lines & labels
+  for (const gMeta of (layout.generations || [])) {
+    layerBands.appendChild(svgEl("line", {
+      class: "gen-band-line",
+      x1: 16,
+      y1: gMeta.y,
+      x2: Math.max(layout.width - 16, 400),
+      y2: gMeta.y,
+    }));
+    const lbl = svgEl("text", {
+      class: "gen-band-label",
+      x: 16,
+      y: gMeta.y - ch / 2 - 10,
+    });
+    lbl.textContent = gMeta.label;
+    layerBands.appendChild(lbl);
+  }
+
+  // Map hubKey -> full baseVisible children list from server layout (so collapsed hubs still know their collateral count)
+  const serverHubChildren = new Map();
+  for (const sh of (data.layout?.hubs || [])) {
+    serverHubChildren.set(hubKeyOf(sh), (sh.children || []).filter(c => baseVisible.has(c)));
+  }
+
   const visibleHubs = new Map();
   for (const h of layout.hubs) {
     const anyParent = h.parents.some(p => visible.has(p));
     const anyChild = h.children.some(c => visible.has(c));
-    if (anyParent && (h.marriage || anyChild)) visibleHubs.set(h.id, h);
+    if (anyParent && (h.marriage || anyChild || state.collapsedCollaterals.has(hubKeyOf(h)))) {
+      visibleHubs.set(h.id, h);
+    }
+  }
+  _renderedRefs.visibleHubs = visibleHubs;
+  if (recomputeAlignments) {
+    state.rowOffsets = computeOffsetsFromAlignments(layout, visibleHubs);
   }
 
   // Draw edges
   for (const edge of layout.edges) {
     if (edge.kind === "fan_associate" && !state.showFan) continue;
-    let x1, y1, x2, y2, dStr;
     let isHighlighted = false;
 
     if (edge.kind === "spouse_to_hub") {
       if (!visible.has(edge.from) || !visibleHubs.has(edge.to)) continue;
-      const p = layout.nodes[edge.from];
       const h = visibleHubs.get(edge.to);
-      x1 = p.x; y1 = p.y + ch / 2;
-      x2 = h.x; y2 = h.y;
-      const midY = (y1 + y2) / 2;
-      dStr = `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
       for (const c of h.children) {
         if (pathPairs.has(`${edge.from}|${c}`)) { isHighlighted = true; break; }
       }
     } else if (edge.kind === "hub_to_child") {
       if (!visibleHubs.has(edge.from) || !visible.has(edge.to)) continue;
-      const h = visibleHubs.get(edge.from);
-      const c = layout.nodes[edge.to];
-      x1 = h.x; y1 = h.y;
-      x2 = c.x; y2 = c.y - ch / 2;
-      const midY = (y1 + y2) / 2;
-      dStr = `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
       for (const p of (edge.parents || [])) {
         if (pathPairs.has(`${p}|${edge.to}`)) { isHighlighted = true; break; }
       }
     } else {
       if (!visible.has(edge.from) || !visible.has(edge.to)) continue;
-      const a = layout.nodes[edge.from];
-      const b = layout.nodes[edge.to];
-      x1 = a.x; y1 = a.y;
-      x2 = b.x; y2 = b.y;
-      const mx = (x1 + x2) / 2;
-      const my = Math.min(y1, y2) - 44;
-      dStr = `M ${x1} ${y1} Q ${mx} ${my}, ${x2} ${y2}`;
     }
+
+    const dStr = computeEdgePath(layout, edge, visibleHubs);
+    if (!dStr) continue;
 
     const cls = ["edge-path", edge.confidence || ""];
     if (edge.kind === "fan_associate") cls.push("fan");
@@ -1527,7 +2961,9 @@ function renderGraph() {
     if (isHighlighted) cls.push("highlighted");
     else if (hasHighlight) cls.push("dimmed");
 
-    layerEdges.appendChild(svgEl("path", { d: dStr, class: cls.join(" ") }));
+    const pathEl = svgEl("path", { d: dStr, class: cls.join(" ") });
+    layerEdges.appendChild(pathEl);
+    _renderedRefs.edges.push({ edge, el: pathEl });
   }
 
   // Draw Marriage / Family Hubs
@@ -1535,32 +2971,89 @@ function renderGraph() {
     const gCls = ["hub-group"];
     if (state.showConsang && h.consanguineous) gCls.push("consang");
     if (state.selectedHubId === h.id) gCls.push("selected");
-    const g = svgEl("g", { class: gCls.join(" "), transform: `translate(${h.x},${h.y})` });
-    const s = 8;
+    const hp = getVisualHubPos(layout, h);
+    const g = svgEl("g", { class: gCls.join(" "), transform: `translate(${hp.x},${hp.y})` });
+    const s = h.inline ? 6.5 : 8;
     g.appendChild(svgEl("polygon", {
       class: "hub-diamond",
       points: `0,${-s} ${s},0 0,${s} ${-s},0`,
     }));
-    if (h.marriage?.date || (state.showConsang && h.consanguineous)) {
+    const hasLabel = !!(h.marriage?.date || (state.showConsang && h.consanguineous));
+    if (hasLabel) {
       const lblText = (state.showConsang && h.consanguineous ? "⚠ " : "") + (h.marriage?.date ? `m. ${h.marriage.date}` : "related");
-      const lbl = svgEl("text", { class: "hub-label", y: 20 });
+      const lbl = svgEl("text", { class: "hub-label", y: h.inline ? ch / 2 + 13 : 20 });
       lbl.textContent = lblText;
       g.appendChild(lbl);
     }
+
+    // Collateral children expand/collapse pill on the downward stem below the hub
+    const hKey = hubKeyOf(h);
+    const allHubChildren = serverHubChildren.get(hKey) || h.children || [];
+    const directKids = allHubChildren.filter(c => directAncestors.has(c));
+    const collateralKids = allHubChildren.filter(c => !directAncestors.has(c));
+    if (collateralKids.length > 0) {
+      const isColCollapsed = state.collapsedCollaterals.has(hKey);
+      const colCount = collateralKids.length;
+      const noun = directKids.length > 0 ? (colCount === 1 ? "sib" : "sibs") : "ch.";
+      const pillText = isColCollapsed ? `+${colCount} ${noun}` : `−${colCount} ${noun}`;
+      const pillW = Math.max(46, pillText.length * 6.2 + 12);
+      const pillH = 17;
+      const pillY = h.inline ? (hasLabel ? ch / 2 + 19 : ch / 2 + 6) : (hasLabel ? 26 : 12);
+      const parentNames = h.parents.map(p => data.individuals[p]?.primary_name || p).join(" & ");
+      const colG = svgEl("g", {
+        class: isColCollapsed ? "collateral-toggle is-collapsed" : "collateral-toggle",
+        transform: `translate(${-pillW / 2}, ${pillY})`,
+        role: "button",
+        tabindex: "0",
+        "aria-expanded": String(!isColCollapsed),
+        "aria-label": isColCollapsed
+          ? `Show ${colCount} collateral children of ${parentNames}`
+          : `Hide ${colCount} collateral children of ${parentNames}`,
+      });
+      const tEl = svgEl("title");
+      tEl.textContent = isColCollapsed
+        ? `Show ${colCount} collateral ${directKids.length > 0 ? "sibling(s) & descendants" : "child(ren) & descendants"} of ${parentNames}`
+        : `Hide ${colCount} collateral ${directKids.length > 0 ? "sibling(s) (keep direct line)" : "child(ren)"} of ${parentNames}`;
+      colG.appendChild(tEl);
+      colG.appendChild(svgEl("rect", { width: pillW, height: pillH }));
+      const ct = svgEl("text", { x: pillW / 2, y: 11.8 });
+      ct.textContent = pillText;
+      colG.appendChild(ct);
+      const onColToggle = (ev) => {
+        ev.stopPropagation();
+        toggleHubCollaterals(hKey, h.id);
+      };
+      colG.addEventListener("click", onColToggle);
+      colG.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          onColToggle(ev);
+        }
+      });
+      g.appendChild(colG);
+    }
+
+    g.addEventListener("pointerenter", () => applyHoverFocusForHub(h));
+    g.addEventListener("pointerleave", scheduleClearHoverFocus);
     g.addEventListener("click", (ev) => {
       ev.stopPropagation();
       selectHub(h);
     });
     layerHubs.appendChild(g);
+    _renderedRefs.hubs.set(h.id, g);
   }
+
+  const svgRoot = document.getElementById("graph");
+  if (svgRoot) svgRoot.classList.toggle("compact-collateral", !!state.compactCollateral);
 
   // Draw Individual Cards
   for (const iid of visible) {
-    const pos = layout.nodes[iid];
+    const pos = getVisualNodePos(layout, iid);
     const ind = data.individuals[iid];
     if (!pos || !ind) continue;
 
     const cls = ["node-group", `status-${ind.status}`];
+    if (directAncestors.size && !directAncestors.has(iid)) cls.push("non-direct");
     if (state.selectedId === iid) cls.push("selected");
     if (state.compareId === iid) cls.push("compare-target");
     if (pathNodes.has(iid)) cls.push("in-path");
@@ -1579,25 +3072,69 @@ function renderGraph() {
     const g = svgEl("g", {
       class: cls.join(" "),
       transform: `translate(${pos.x - cw / 2}, ${pos.y - ch / 2})`,
+      tabindex: "0",
+      role: "button",
+      "aria-label": `${ind.primary_name} (${iid})`,
     });
 
-    g.appendChild(svgEl("rect", { class: "node-card", width: cw, height: ch }));
+    const inner = svgEl("g", { class: "node-inner" });
+    g.appendChild(inner);
+
+    inner.appendChild(svgEl("rect", { class: "node-card", width: cw, height: ch }));
 
     const nameEl = svgEl("text", { class: "node-name", x: 12, y: 26 });
     const nameStr = ind.primary_name.length > 24 ? ind.primary_name.slice(0, 23) + "…" : ind.primary_name;
     nameEl.textContent = nameStr;
-    g.appendChild(nameEl);
+    inner.appendChild(nameEl);
 
     const b = ind.birth?.date || "?";
     const d = ind.living ? "Living" : (ind.death?.date || "?");
     const datesEl = svgEl("text", { class: "node-dates", x: 12, y: 45 });
     datesEl.textContent = `${b} – ${d} · ${ind.sex}`;
-    g.appendChild(datesEl);
+    inner.appendChild(datesEl);
 
     const idEl = svgEl("text", { class: "node-id", x: 12, y: 65 });
     const extra = ind.inbreeding_f > 0 && state.showConsang ? ` · F=${ind.inbreeding_f.toFixed(4)}` : "";
     idEl.textContent = `${iid}${extra}`;
-    g.appendChild(idEl);
+    inner.appendChild(idEl);
+
+    // Ancestry-style Expand / Collapse branch pill at top-center for anyone with parents
+    const hasParents = (idx.parentsOf[iid] || []).some(p => baseVisible.has(p));
+    if (hasParents) {
+      const isCollapsed = state.collapsedAncestors.has(iid);
+      const ancCount = isCollapsed ? countAncestorsIn(iid, baseVisible, idx) : 0;
+      const pillW = isCollapsed ? 46 : 22;
+      const pillH = 18;
+      const toggleG = svgEl("g", {
+        class: isCollapsed ? "branch-toggle is-collapsed" : "branch-toggle",
+        transform: `translate(${(cw - pillW) / 2}, ${-pillH / 2})`,
+        role: "button",
+        tabindex: "0",
+        "aria-expanded": String(!isCollapsed),
+        "aria-label": isCollapsed
+          ? `Expand ${ancCount} ancestor(s) of ${ind.primary_name}`
+          : `Collapse ancestors of ${ind.primary_name}`,
+      });
+      const titleEl = svgEl("title");
+      titleEl.textContent = isCollapsed ? `Expand ${ancCount} ancestor(s)` : "Collapse ancestors";
+      toggleG.appendChild(titleEl);
+      toggleG.appendChild(svgEl("rect", { width: pillW, height: pillH }));
+      const txt = svgEl("text", { x: pillW / 2, y: 12.5 });
+      txt.textContent = isCollapsed ? `⌄ +${ancCount}` : "⌃";
+      toggleG.appendChild(txt);
+      const onToggle = (ev) => {
+        ev.stopPropagation();
+        toggleBranchCollapse(iid);
+      };
+      toggleG.addEventListener("click", onToggle);
+      toggleG.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          onToggle(ev);
+        }
+      });
+      inner.appendChild(toggleG);
+    }
 
     // Multi-path ancestor badge (×2, ×3...)
     const mCount = multiPathBadges[iid];
@@ -1607,7 +3144,7 @@ function renderGraph() {
       const bt = svgEl("text", { x: 16, y: 12.5, "text-anchor": "middle" });
       bt.textContent = `×${mCount}`;
       bg.appendChild(bt);
-      g.appendChild(bg);
+      inner.appendChild(bg);
     }
 
     // Era / Regional census coverage badge (only when eraYear is an applicable census year for THIS individual's region!)
@@ -1622,14 +3159,44 @@ function renderGraph() {
       const ct = svgEl("text", { x: 26, y: 12.5, "text-anchor": "middle" });
       ct.textContent = `${hasCensus ? "✓" : "?"} ${eraYear}`;
       cBadge.appendChild(ct);
-      g.appendChild(cBadge);
+      inner.appendChild(cBadge);
     }
 
+    g.addEventListener("pointerenter", () => applyHoverFocusForNode(iid, true));
+    g.addEventListener("pointerleave", scheduleClearHoverFocus);
+    g.addEventListener("focusin", () => applyHoverFocusForNode(iid, false));
+    g.addEventListener("focusout", (ev) => {
+      if (!g.contains(ev.relatedTarget)) scheduleClearHoverFocus();
+    });
     g.addEventListener("click", (ev) => {
       ev.stopPropagation();
       onNodeClick(iid, ev.shiftKey);
     });
+    g.addEventListener("keydown", (ev) => {
+      if (ev.target === g && (ev.key === "Enter" || ev.key === " ")) {
+        ev.preventDefault();
+        onNodeClick(iid, ev.shiftKey);
+      }
+    });
     layerNodes.appendChild(g);
+    _renderedRefs.nodes.set(iid, g);
+  }
+
+  const totalCollapsed = state.collapsedAncestors.size + state.collapsedCollaterals.size;
+  const btnExpandAll = document.getElementById("btn-expand-all");
+  if (btnExpandAll) {
+    btnExpandAll.hidden = totalCollapsed === 0;
+    if (totalCollapsed > 0) {
+      btnExpandAll.textContent = `Expand All (${totalCollapsed})`;
+    }
+  }
+  const btnHideCol = document.getElementById("btn-collapse-collaterals");
+  if (btnHideCol) {
+    const anyUncollapsedCollateral = (data.layout?.hubs || []).some(sh => {
+      const hasCol = (sh.children || []).some(c => baseVisible.has(c) && !directAncestors.has(c));
+      return hasCol && !state.collapsedCollaterals.has(hubKeyOf(sh));
+    });
+    btnHideCol.hidden = !anyUncollapsedCollateral;
   }
 
   updateMetaBar();
@@ -1643,11 +3210,22 @@ function updateMetaBar() {
 }
 
 async function onNodeClick(iid, shiftKey) {
+  cancelHoverAlignTimer();
   if ((state.compareMode || shiftKey) && state.selectedId && state.selectedId !== iid) {
     state.compareId = iid;
     state.compareMode = false;
     state.selectedHubId = null;
     state.kinshipResult = await fetchKinship(state.selectedId, iid);
+    renderGraph();
+    renderDrawer();
+    return;
+  }
+  // Clicking the already-selected individual unselects them without moving cards
+  if (!state.compareMode && !shiftKey && state.selectedId === iid) {
+    state.selectedId = null;
+    state.selectedHubId = null;
+    state.compareId = null;
+    state.kinshipResult = null;
     renderGraph();
     renderDrawer();
     return;
@@ -1659,6 +3237,7 @@ async function onNodeClick(iid, shiftKey) {
   state.kinshipResult = null;
   renderGraph();
   renderDrawer();
+  alignParentsOverNode(iid);
 }
 
 function selectHub(hub) {
@@ -1783,7 +3362,9 @@ function renderDrawer() {
 
   // Case 1: Marriage / Union Hub selected
   if (state.selectedHubId) {
-    const hub = state.data.layout.hubs.find(h => h.id === state.selectedHubId);
+    const activeHubs = (state.activeLayout || state.data.layout).hubs || [];
+    const hub = activeHubs.find(h => h.id === state.selectedHubId)
+      || (state.data.layout.hubs || []).find(h => h.id === state.selectedHubId);
     if (!hub) return;
     const names = hub.parents.map(id => state.data.individuals[id]?.primary_name || id).join(" & ");
     drawer.appendChild(el("h2", {}, `Union: ${names}`));
@@ -2105,21 +3686,46 @@ function applyTransform() {
   document.getElementById("viewport").setAttribute("transform", `translate(${state.tx},${state.ty}) scale(${state.scale})`);
 }
 
-function fitToView() {
+function fitToView({ preserveAlignments = false } = {}) {
+  cancelRowOffsetAnimation();
+  cancelHoverAlignTimer();
+  if (!preserveAlignments) {
+    state.rowAlignments = {};
+    if (Object.keys(state.rowOffsets).length) {
+      state.rowOffsets = {};
+      applyRowOffsetsToDom();
+    }
+  }
   const wrap = document.getElementById("canvas-wrap");
   const rect = wrap.getBoundingClientRect();
-  const lw = state.data.layout.width || 960;
-  const lh = state.data.layout.height || 600;
+  const active = state.activeLayout || state.data.layout;
+  const cw = active.card_w || 216;
+  const ch = active.card_h || 82;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const iid of Object.keys(active.nodes || {})) {
+    const vp = getVisualNodePos(active, iid);
+    if (!vp) continue;
+    minX = Math.min(minX, vp.x - cw / 2);
+    maxX = Math.max(maxX, vp.x + cw / 2);
+    minY = Math.min(minY, vp.y - ch / 2);
+    maxY = Math.max(maxY, vp.y + ch / 2);
+  }
+  if (!Number.isFinite(minX)) {
+    minX = 0; maxX = active.width || 960; minY = 0; maxY = active.height || 600;
+  }
+  const lw = Math.max(300, maxX - minX + 96);
+  const lh = Math.max(240, maxY - minY + 96);
   const pad = 48;
   const s = Math.min((rect.width - pad) / lw, (rect.height - pad) / lh, 1.15);
   state.scale = Math.max(0.04, s);
-  state.tx = (rect.width - lw * state.scale) / 2;
-  state.ty = Math.max(24, (rect.height - lh * state.scale) / 2);
+  state.tx = (rect.width - (minX + maxX) * state.scale) / 2;
+  state.ty = (rect.height - (minY + maxY) * state.scale) / 2;
   applyTransform();
 }
 
 function centerOnNode(iid) {
-  const pos = state.data.layout.nodes[iid];
+  const active = state.activeLayout || state.data.layout;
+  const pos = getVisualNodePos(active, iid);
   if (!pos) return;
   const wrap = document.getElementById("canvas-wrap");
   const rect = wrap.getBoundingClientRect();
@@ -2134,7 +3740,8 @@ function initPanZoom() {
   let dragging = false, sx = 0, sy = 0;
 
   wrap.addEventListener("pointerdown", (e) => {
-    if (e.target.closest(".node-group, .hub-group, .canvas-controls")) return;
+    if (e.target.closest(".node-group, .hub-group, .branch-toggle, .collateral-toggle, .canvas-controls")) return;
+    cancelHoverAlignTimer();
     dragging = true;
     sx = e.clientX - state.tx;
     sy = e.clientY - state.ty;
@@ -2163,7 +3770,16 @@ function initPanZoom() {
 
   document.getElementById("btn-zoom-in").addEventListener("click", () => { state.scale = Math.min(2.5, state.scale * 1.25); applyTransform(); });
   document.getElementById("btn-zoom-out").addEventListener("click", () => { state.scale = Math.max(0.04, state.scale / 1.25); applyTransform(); });
-  document.getElementById("btn-fit").addEventListener("click", fitToView);
+  document.getElementById("btn-fit").addEventListener("click", () => fitToView());
+  document.getElementById("btn-collapse-collaterals").addEventListener("click", collapseAllCollaterals);
+  document.getElementById("btn-expand-all").addEventListener("click", () => {
+    state.collapsedAncestors.clear();
+    state.collapsedCollaterals.clear();
+    state.rowAlignments = {};
+    state.rowOffsets = {};
+    renderGraph();
+    fitToView();
+  });
   document.getElementById("btn-clear-sel").addEventListener("click", () => {
     state.selectedId = null; state.selectedHubId = null; state.compareId = null; state.kinshipResult = null;
     renderGraph(); renderDrawer();
@@ -2227,8 +3843,10 @@ async function loadPlaceProfile(placeId, focalId) {
 function exportSvg() {
   const orig = document.getElementById("graph");
   const clone = orig.cloneNode(true);
-  const lw = state.data.layout.width || 960;
-  const lh = state.data.layout.height || 600;
+  clone.classList.remove("hover-focus-active");
+  const active = state.activeLayout || state.data.layout;
+  const lw = active.width || 960;
+  const lh = active.height || 600;
   clone.setAttribute("viewBox", `0 0 ${lw} ${lh}`);
   clone.setAttribute("width", String(lw));
   clone.setAttribute("height", String(lh));
@@ -2238,6 +3856,11 @@ function exportSvg() {
   const cs = getComputedStyle(document.documentElement);
   const v = (name, fb) => cs.getPropertyValue(name).trim() || fb;
   const inlineCss = `
+    .gen-band-line { stroke: ${v("--border", "#ccc")}; stroke-width: 1; stroke-dasharray: 4 6; opacity: 0.45; }
+    .gen-band-label { font: 600 11px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; opacity: 0.72; }
+    .node-inner { transform-origin: 108px 41px; transform: scale(1); }
+    svg.compact-collateral .node-group.non-direct .node-inner { transform: scale(0.82); }
+    svg.compact-collateral .node-group.non-direct.selected .node-inner { transform: scale(1); }
     .node-card { fill: ${v("--surface", "#fff")}; stroke: ${v("--border", "#ccc")}; stroke-width: 1.6; rx: 10; }
     .node-group.status-confirmed .node-card { stroke: ${v("--confirmed", "#047857")}; }
     .node-group.status-tentative .node-card { stroke: ${v("--tentative", "#b45309")}; stroke-dasharray: 5 3; }
@@ -2247,6 +3870,14 @@ function exportSvg() {
     .node-name { font: 700 13px system-ui, sans-serif; fill: ${v("--text", "#161d26")}; }
     .node-dates { font: 11px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; }
     .node-id { font: 9.5px monospace; fill: ${v("--muted", "#5a6678")}; }
+    .branch-toggle rect { fill: ${v("--surface", "#fff")}; stroke: ${v("--border", "#ccc")}; stroke-width: 1.5; rx: 10; }
+    .branch-toggle.is-collapsed rect { fill: ${v("--accent", "#1d4ed8")}; stroke: ${v("--accent", "#1d4ed8")}; }
+    .branch-toggle text { font: 700 10px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; text-anchor: middle; }
+    .branch-toggle.is-collapsed text { fill: #fff; }
+    .collateral-toggle rect { fill: ${v("--surface", "#fff")}; stroke: ${v("--border", "#ccc")}; stroke-width: 1.4; rx: 9; }
+    .collateral-toggle.is-collapsed rect { fill: ${v("--collapse", "#7c3aed")}; stroke: ${v("--collapse", "#7c3aed")}; }
+    .collateral-toggle text { font: 700 9.5px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; text-anchor: middle; }
+    .collateral-toggle.is-collapsed text { fill: #fff; }
     .badge-collapse rect { fill: ${v("--collapse", "#7c3aed")}; rx: 8; }
     .badge-collapse text { fill: #fff; font: 700 10px system-ui, sans-serif; }
     .badge-census-ok rect { fill: ${v("--confirmed", "#047857")}; rx: 8; }
@@ -2280,12 +3911,18 @@ function exportSvg() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function reloadFromServer() {
+async function reloadFromServer({ preserveOffsets = false } = {}) {
   if (STANDALONE_MODE) return;
+  cancelRowOffsetAnimation();
+  cancelHoverAlignTimer();
   const r = state.redactLiving ? "1" : "0";
   const resp = await fetch(`/api/graph.json?redact_living=${r}`);
   if (!resp.ok) return;
   state.data = await resp.json();
+  if (!preserveOffsets) {
+    state.rowAlignments = {};
+    state.rowOffsets = {};
+  }
   populateTractFilter();
   populatePlaceFilter();
   if (state.selectedPlace) await loadPlaceProfile(state.selectedPlace, state.placeFocalId);
@@ -2313,6 +3950,9 @@ function initToolbar() {
     }
   });
   document.getElementById("focus-mode").addEventListener("change", (e) => {
+    cancelRowOffsetAnimation();
+    state.rowAlignments = {};
+    state.rowOffsets = {};
     state.focusMode = e.target.value;
     renderGraph();
   });
@@ -2370,6 +4010,11 @@ function initToolbar() {
 
   document.getElementById("toggle-fan").addEventListener("change", (e) => { state.showFan = e.target.checked; renderGraph(); });
   document.getElementById("toggle-consang").addEventListener("change", (e) => { state.showConsang = e.target.checked; renderGraph(); });
+  document.getElementById("toggle-compact-collateral").addEventListener("change", (e) => {
+    state.compactCollateral = e.target.checked;
+    const svg = document.getElementById("graph");
+    if (svg) svg.classList.toggle("compact-collateral", state.compactCollateral);
+  });
   document.getElementById("toggle-excluded").addEventListener("change", (e) => { state.showExcluded = e.target.checked; renderGraph(); });
   document.getElementById("btn-export-svg").addEventListener("click", exportSvg);
 
@@ -2382,9 +4027,9 @@ function initToolbar() {
   } else {
     redactBox.addEventListener("change", async (e) => {
       state.redactLiving = e.target.checked;
-      await reloadFromServer();
+      await reloadFromServer({ preserveOffsets: true });
     });
-    document.getElementById("btn-reload").addEventListener("click", reloadFromServer);
+    document.getElementById("btn-reload").addEventListener("click", () => reloadFromServer());
   }
 }
 
