@@ -30,9 +30,9 @@ from genealogy.loader import Dataset, load_dataset
 from genealogy.schema import parse_genealogy_date
 
 CARD_W = 216
-CARD_H = 82
+CARD_H = 88
 HUB_SIZE = 18
-LAYER_GAP_Y = 176
+LAYER_GAP_Y = 192
 COUPLE_GAP_X = 28
 UNIT_GAP_X = 56
 MARGIN_X = 140
@@ -386,6 +386,140 @@ def _compute_dag_layout(
             scored_up.sort(key=lambda t: (t[0], t[1], t[2]))
             row_units[r] = [t[3] for t in scored_up]
 
+    # Step 4b: Exact crossing-count + span 2-opt optimization (escapes barycenter local minima like double-X inversions)
+    def _row_cost(r: int, pos_map: dict[str, float]) -> float:
+        # Compute local pos for row r from current row_units[r]
+        local_pos: dict[str, float] = {}
+        cur = 0.0
+        for unit in row_units[r]:
+            for iid in unit:
+                local_pos[iid] = cur
+                cur += 1.0
+            cur += 0.5
+
+        def _pair_cost(edges_uv: list[tuple[float, float]]) -> float:
+            m = len(edges_uv)
+            if m <= 1:
+                return sum((u - v) ** 2 for u, v in edges_uv) * 0.05
+            crossings = 0
+            span = 0.0
+            for i in range(m):
+                u1, v1 = edges_uv[i]
+                span += (u1 - v1) ** 2
+                for j in range(i + 1, m):
+                    u2, v2 = edges_uv[j]
+                    if (u1 - u2) * (v1 - v2) < 0:
+                        crossings += 1
+            return crossings * 100.0 + span * 0.05
+
+        up_edges: list[tuple[float, float]] = []
+        down_edges: list[tuple[float, float]] = []
+        for unit in row_units[r]:
+            for iid in unit:
+                lx = local_pos[iid]
+                for p in parents_of.get(iid, []):
+                    if p in pos_map:
+                        up_edges.append((pos_map[p], lx))
+                for c in children_of.get(iid, []):
+                    if c in pos_map:
+                        down_edges.append((lx, pos_map[c]))
+        return _pair_cost(up_edges) + _pair_cost(down_edges)
+
+    for _ in range(6):
+        improved_any = False
+        for r in list(sorted_ranks) + list(reversed(sorted_ranks)):
+            units = row_units[r]
+            k = len(units)
+            if k == 0:
+                continue
+            pos_map = _node_x_index()
+            best_cost = _row_cost(r, pos_map)
+            # Try flipping 2-person couples
+            for i in range(k):
+                if len(units[i]) == 2:
+                    units[i] = [units[i][1], units[i][0]]
+                    c = _row_cost(r, pos_map)
+                    if c + 1e-6 < best_cost:
+                        best_cost = c
+                        improved_any = True
+                    else:
+                        units[i] = [units[i][1], units[i][0]]
+            # Try 2-opt unit swaps (all pairs for k <= 30, windowed for huge layers)
+            max_dist = k if k <= 30 else 14
+            for i in range(k):
+                for j in range(i + 1, min(k, i + max_dist + 1)):
+                    units[i], units[j] = units[j], units[i]
+                    c = _row_cost(r, pos_map)
+                    if c + 1e-6 < best_cost:
+                        best_cost = c
+                        improved_any = True
+                    else:
+                        units[i], units[j] = units[j], units[i]
+
+        # Coupled 2-layer move: flip a 2-person couple [a, b] in row r, swap their two parent units in row r-1,
+        # and let unconstrained units in row r-2 re-align by child barycenter before measuring total crossings.
+        for idx_r in range(1, len(sorted_ranks)):
+            r = sorted_ranks[idx_r]
+            r_prev = sorted_ranks[idx_r - 1]
+            r_prev2 = sorted_ranks[idx_r - 2] if idx_r >= 2 else None
+            prev_units = row_units[r_prev]
+            node_to_prev_u: dict[str, int] = {}
+            for ui, u in enumerate(prev_units):
+                for m in u:
+                    node_to_prev_u[m] = ui
+            for i, unit in enumerate(row_units[r]):
+                if len(unit) != 2:
+                    continue
+                a, b = unit[0], unit[1]
+                ua_set = {node_to_prev_u[p] for p in parents_of.get(a, []) if p in node_to_prev_u}
+                ub_set = {node_to_prev_u[p] for p in parents_of.get(b, []) if p in node_to_prev_u}
+                if len(ua_set) != 1 or len(ub_set) != 1:
+                    continue
+                ua, ub = next(iter(ua_set)), next(iter(ub_set))
+                if ua == ub:
+                    continue
+                saved_r = [list(u) for u in row_units[r]]
+                saved_prev = [list(u) for u in row_units[r_prev]]
+                saved_prev2 = [list(u) for u in row_units[r_prev2]] if r_prev2 is not None else None
+
+                pos_before = _node_x_index()
+                cost_before = _row_cost(r_prev, pos_before) + _row_cost(r, pos_before)
+                if r_prev2 is not None:
+                    cost_before += _row_cost(r_prev2, pos_before)
+
+                row_units[r][i] = [b, a]
+                row_units[r_prev][ua], row_units[r_prev][ub] = row_units[r_prev][ub], row_units[r_prev][ua]
+                if r_prev2 is not None:
+                    # Re-sort r_prev2 by child barycenter so leaf/unconstrained parents follow their children
+                    pos_mid = _node_x_index()
+                    scored_p2 = []
+                    for u2 in row_units[r_prev2]:
+                        cs = [pos_mid[c] for m in u2 for c in children_of.get(m, []) if c in pos_mid]
+                        bary = sum(cs) / len(cs) if cs else sum(pos_mid[m] for m in u2) / len(u2)
+                        scored_p2.append((bary, min(_birth_year(m) for m in u2), u2[0], u2))
+                    scored_p2.sort(key=lambda t: (t[0], t[1], t[2]))
+                    row_units[r_prev2] = [t[3] for t in scored_p2]
+
+                pos_after = _node_x_index()
+                cost_after = _row_cost(r_prev, pos_after) + _row_cost(r, pos_after)
+                if r_prev2 is not None:
+                    cost_after += _row_cost(r_prev2, pos_after)
+
+                if cost_after + 1e-6 < cost_before:
+                    improved_any = True
+                    # Refresh node_to_prev_u since row_units[r_prev] changed
+                    node_to_prev_u.clear()
+                    for ui, u in enumerate(row_units[r_prev]):
+                        for m in u:
+                            node_to_prev_u[m] = ui
+                else:
+                    row_units[r] = saved_r
+                    row_units[r_prev] = saved_prev
+                    if r_prev2 is not None and saved_prev2 is not None:
+                        row_units[r_prev2] = saved_prev2
+        if not improved_any:
+            break
+
     # Step 5: Optimal X-coordinate alignment using PAVA (parents aligned above children, zero overlap)
     def _unit_width(unit: list[str]) -> float:
         return len(unit) * CARD_W + (len(unit) - 1) * COUPLE_GAP_X
@@ -455,7 +589,7 @@ def _compute_dag_layout(
 
     nodes_pos: dict[str, dict[str, Any]] = {}
     generations_meta: list[dict[str, Any]] = []
-    focal_rank = rank.get(focal_id) if focal_id else None
+    focal_rank = rank.get(focal_id) if focal_id else (sorted_ranks[-1] if sorted_ranks else None)
 
     for row_idx, r in enumerate(sorted_ranks):
         y = float(MARGIN_Y + row_idx * LAYER_GAP_Y)
@@ -582,9 +716,9 @@ def _compute_dag_layout(
         corridor_hubs[min_child_gen].append(h)
 
     for child_gen, ch_list in corridor_hubs.items():
-        # Corridor sits directly above child_gen row
+        # Corridor sits directly above child_gen row (leaving room for marriage date + collateral pill above)
         child_y = min(nodes_pos[c]["y"] for h in ch_list for c in h["children"] if nodes_pos[c]["generation"] == child_gen)
-        corridor_top = child_y - LAYER_GAP_Y + CARD_H / 2.0 + 24.0
+        corridor_top = child_y - LAYER_GAP_Y + CARD_H / 2.0 + 44.0
         corridor_bot = child_y - CARD_H / 2.0 - 22.0
         corridor_mid = (corridor_top + corridor_bot) / 2.0
 
@@ -615,10 +749,41 @@ def _compute_dag_layout(
             by = corridor_mid + (lane - (num_lanes - 1) / 2.0) * step
             h["bus_y"] = round(max(corridor_top, min(corridor_bot, by)), 1)
 
+    # Helper: find a clear vertical gap X across intermediate rows for multi-generation edges
+    row_intervals: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for pos in nodes_pos.values():
+        row_intervals[pos["generation"]].append((pos["x"] - CARD_W / 2.0 - 10.0, pos["x"] + CARD_W / 2.0 + 10.0))
+    for g_iv in row_intervals.values():
+        g_iv.sort()
+
+    def _find_clear_route_x(g_start: int, g_end: int, preferred_x: float) -> float | None:
+        if g_end - g_start <= 1:
+            return None
+        blocked: list[tuple[float, float]] = []
+        for g in range(g_start + 1, g_end):
+            blocked.extend(row_intervals.get(g, []))
+        if not blocked:
+            return None
+        blocked.sort()
+        merged: list[tuple[float, float]] = [blocked[0]]
+        for s, e in blocked[1:]:
+            ps, pe = merged[-1]
+            if s <= pe:
+                merged[-1] = (ps, max(pe, e))
+            else:
+                merged.append((s, e))
+        # Candidate clear X positions: left of all, midpoints of gaps, right of all
+        cands: list[float] = [merged[0][0] - 18.0, merged[-1][1] + 18.0]
+        for i in range(len(merged) - 1):
+            if merged[i + 1][0] - merged[i][1] >= 12.0:
+                cands.append((merged[i][1] + merged[i + 1][0]) / 2.0)
+        return round(min(cands, key=lambda cx: abs(cx - preferred_x)), 1)
+
     for h in hubs:
         hid = h["id"]
         ps = h["parents"]
         m_conf = h["marriage"]["confidence"] if h["marriage"] else "probable"
+        parent_gen = max(nodes_pos[p]["generation"] for p in ps) if ps else 0
         for p in ps:
             edges.append(
                 {
@@ -641,19 +806,23 @@ def _compute_dag_layout(
                 default="probable",
             )
             subtype = next((m["subtype"] for m in metas if m["subtype"] != "biological"), "biological")
-            edges.append(
-                {
-                    "id": f"E-C-{hid}-{c}",
-                    "kind": "hub_to_child",
-                    "from_type": "hub",
-                    "from": hid,
-                    "to_type": "individual",
-                    "to": c,
-                    "parents": ps,
-                    "confidence": best_conf,
-                    "subtype": subtype,
-                }
-            )
+            child_gen = nodes_pos[c]["generation"]
+            route_x = _find_clear_route_x(parent_gen, child_gen, (h["x"] + nodes_pos[c]["x"]) / 2.0)
+            edge_obj: dict[str, Any] = {
+                "id": f"E-C-{hid}-{c}",
+                "kind": "hub_to_child",
+                "from_type": "hub",
+                "from": hid,
+                "to_type": "individual",
+                "to": c,
+                "parents": ps,
+                "confidence": best_conf,
+                "subtype": subtype,
+            }
+            if route_x is not None:
+                edge_obj["route_x"] = route_x
+                edge_obj["bot_bus_y"] = round(nodes_pos[c]["y"] - CARD_H / 2.0 - 24.0, 1)
+            edges.append(edge_obj)
 
     # Direct sibling / FAN associate edges
     for idx, rel in enumerate(ds.relationships):
@@ -1268,11 +1437,18 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
 
     /* SVG Graph Nodes, Bands, Branches & Hover Focus */
     .gen-band-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 6; opacity: 0.45; }
+    .gen-band-pill { pointer-events: none; }
+    .gen-band-pill rect {
+      fill: var(--surface);
+      stroke: var(--border);
+      stroke-width: 1;
+      rx: 6;
+      opacity: 0.9;
+    }
     .gen-band-label {
       font-size: 11px;
       font-weight: 600;
       fill: var(--muted);
-      opacity: 0.72;
       user-select: none;
     }
 
@@ -1281,7 +1457,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
       transition: opacity 220ms ease-in;
     }
     .node-inner {
-      transform-origin: 108px 41px;
+      transform-origin: 108px 44px;
       transform: scale(1);
     }
     @media (prefers-reduced-motion: no-preference) {
@@ -1322,7 +1498,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     .node-group.compare-target .node-card { stroke: var(--consang); stroke-width: 3; stroke-dasharray: none; }
     .node-group.in-path .node-card { stroke: var(--collapse); stroke-width: 2.8; stroke-dasharray: none; }
     .node-group.in-tract .node-card { stroke: var(--confirmed); stroke-width: 2.8; stroke-dasharray: none; }
-    .node-group.dimmed { opacity: 0.22; }
+    .node-group.dimmed { opacity: 0.36; }
 
     .node-name { font-size: 13px; font-weight: 700; fill: var(--text); }
     .node-dates { font-size: 11px; fill: var(--muted); }
@@ -1480,7 +1656,15 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     .hub-diamond { fill: var(--surface); stroke: var(--muted); stroke-width: 1.8; }
     .hub-group.consang .hub-diamond { fill: var(--consang); stroke: var(--consang); }
     .hub-group.selected .hub-diamond { stroke: var(--accent); stroke-width: 3; }
-    .hub-label { font-size: 10px; fill: var(--muted); text-anchor: middle; }
+    .hub-label {
+      font-size: 10px;
+      fill: var(--muted);
+      text-anchor: middle;
+      paint-order: stroke;
+      stroke: var(--bg);
+      stroke-width: 7px;
+      stroke-linejoin: round;
+    }
     .hub-group.consang .hub-label { fill: var(--consang); font-weight: 700; }
 
     .edge-path {
@@ -1496,7 +1680,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
     .edge-path.fan { stroke: var(--fan); stroke-dasharray: 4 4; opacity: 0.6; }
     .edge-path.consang { stroke: var(--consang); stroke-width: 2.2; opacity: 0.9; }
     .edge-path.highlighted { stroke: var(--collapse); stroke-width: 3.2; stroke-dasharray: none; opacity: 1; }
-    .edge-path.dimmed { opacity: 0.12; }
+    .edge-path.dimmed { opacity: 0.18; }
 
     /* Hover focus spotlight: direct family stays at 100%, others ease smoothly to subtle transparency */
     svg#graph.hover-focus-active .node-group:not(.hover-focus):not(.dimmed) { opacity: 0.28; }
@@ -1608,6 +1792,7 @@ _VIEWER_HTML_TEMPLATE = r"""<!DOCTYPE html>
           <g id="layer-hubs"></g>
           <g id="layer-nodes"></g>
         </g>
+        <g id="layer-gen-labels"></g>
       </svg>
       <div class="canvas-controls">
         <button id="btn-zoom-in" type="button" aria-label="Zoom in">+</button>
@@ -2138,8 +2323,8 @@ function computeClientLayout(visible) {
   }
 
   const cw = serverLayout.card_w || 216;
-  const ch = serverLayout.card_h || 82;
-  const LAYER_GAP_Y = 176;
+  const ch = serverLayout.card_h || 88;
+  const LAYER_GAP_Y = 192;
   const COUPLE_GAP_X = 28;
   const UNIT_GAP_X = 56;
   const MARGIN_X = 140;
@@ -2271,6 +2456,125 @@ function computeClientLayout(visible) {
     }
   }
 
+  // Exact crossing-count + span 2-opt optimization (matches server layout)
+  const rowCost = (r, posMap) => {
+    const localPos = {};
+    let cur = 0;
+    for (const unit of rowUnits[r]) {
+      for (const id of unit) { localPos[id] = cur; cur += 1; }
+      cur += 0.5;
+    }
+    const pairCost = (pairs) => {
+      const m = pairs.length;
+      if (m <= 1) return pairs.reduce((s, [u, v]) => s + (u - v) * (u - v), 0) * 0.05;
+      let crossings = 0, span = 0;
+      for (let i = 0; i < m; i++) {
+        const [u1, v1] = pairs[i];
+        span += (u1 - v1) * (u1 - v1);
+        for (let j = i + 1; j < m; j++) {
+          const [u2, v2] = pairs[j];
+          if ((u1 - u2) * (v1 - v2) < 0) crossings++;
+        }
+      }
+      return crossings * 100 + span * 0.05;
+    };
+    const up = [], down = [];
+    for (const unit of rowUnits[r]) {
+      for (const id of unit) {
+        const lx = localPos[id];
+        for (const p of (parentsOf[id] || [])) if (p in posMap) up.push([posMap[p], lx]);
+        for (const c of (childrenOf[id] || [])) if (c in posMap) down.push([lx, posMap[c]]);
+      }
+    }
+    return pairCost(up) + pairCost(down);
+  };
+  for (let round = 0; round < 5; round++) {
+    let improved = false;
+    const sweepOrder = [...sortedRanks, ...[...sortedRanks].reverse()];
+    for (const r of sweepOrder) {
+      const units = rowUnits[r];
+      const k = units.length;
+      if (!k) continue;
+      const posMap = nodeIndex();
+      let best = rowCost(r, posMap);
+      for (let i = 0; i < k; i++) {
+        if (units[i].length === 2) {
+          units[i] = [units[i][1], units[i][0]];
+          const c = rowCost(r, posMap);
+          if (c + 1e-6 < best) { best = c; improved = true; }
+          else units[i] = [units[i][1], units[i][0]];
+        }
+      }
+      const maxD = k <= 30 ? k : 14;
+      for (let i = 0; i < k; i++) {
+        for (let j = i + 1; j < Math.min(k, i + maxD + 1); j++) {
+          [units[i], units[j]] = [units[j], units[i]];
+          const c = rowCost(r, posMap);
+          if (c + 1e-6 < best) { best = c; improved = true; }
+          else [units[i], units[j]] = [units[j], units[i]];
+        }
+      }
+    }
+    // Coupled 2-layer move: flip 2-person couple [a, b] in row r, swap their two parent units in row r-1,
+    // and let unconstrained units in row r-2 re-align by child barycenter before measuring total crossings
+    for (let ir = 1; ir < sortedRanks.length; ir++) {
+      const r = sortedRanks[ir], rPrev = sortedRanks[ir - 1];
+      const rPrev2 = ir >= 2 ? sortedRanks[ir - 2] : null;
+      const buildNodeToPrevU = () => {
+        const m = {};
+        rowUnits[rPrev].forEach((u, ui) => { for (const x of u) m[x] = ui; });
+        return m;
+      };
+      let nodeToPrevU = buildNodeToPrevU();
+      for (let i = 0; i < rowUnits[r].length; i++) {
+        const unit = rowUnits[r][i];
+        if (unit.length !== 2) continue;
+        const [a, b] = unit;
+        const uaSet = new Set((parentsOf[a] || []).filter(p => p in nodeToPrevU).map(p => nodeToPrevU[p]));
+        const ubSet = new Set((parentsOf[b] || []).filter(p => p in nodeToPrevU).map(p => nodeToPrevU[p]));
+        if (uaSet.size !== 1 || ubSet.size !== 1) continue;
+        const ua = [...uaSet][0], ub = [...ubSet][0];
+        if (ua === ub) continue;
+
+        const savedR = rowUnits[r].map(u => [...u]);
+        const savedPrev = rowUnits[rPrev].map(u => [...u]);
+        const savedPrev2 = rPrev2 !== null ? rowUnits[rPrev2].map(u => [...u]) : null;
+
+        const posBefore = nodeIndex();
+        let costBefore = rowCost(rPrev, posBefore) + rowCost(r, posBefore);
+        if (rPrev2 !== null) costBefore += rowCost(rPrev2, posBefore);
+
+        rowUnits[r][i] = [b, a];
+        [rowUnits[rPrev][ua], rowUnits[rPrev][ub]] = [rowUnits[rPrev][ub], rowUnits[rPrev][ua]];
+        if (rPrev2 !== null) {
+          const posMid = nodeIndex();
+          const scoredP2 = rowUnits[rPrev2].map(u2 => {
+            const cs = u2.flatMap(m => (childrenOf[m] || []).filter(c => c in posMid).map(c => posMid[c]));
+            const bary = cs.length ? cs.reduce((s, x) => s + x, 0) / cs.length
+                                   : u2.reduce((s, m) => s + posMid[m], 0) / u2.length;
+            return { bary, sx: Math.min(...u2.map(serverX)), id: u2[0], unit: u2 };
+          });
+          scoredP2.sort((x, y) => x.bary - y.bary || x.sx - y.sx || x.id.localeCompare(y.id));
+          rowUnits[rPrev2] = scoredP2.map(s => s.unit);
+        }
+
+        const posAfter = nodeIndex();
+        let costAfter = rowCost(rPrev, posAfter) + rowCost(r, posAfter);
+        if (rPrev2 !== null) costAfter += rowCost(rPrev2, posAfter);
+
+        if (costAfter + 1e-6 < costBefore) {
+          improved = true;
+          nodeToPrevU = buildNodeToPrevU();
+        } else {
+          rowUnits[r] = savedR;
+          rowUnits[rPrev] = savedPrev;
+          if (rPrev2 !== null && savedPrev2 !== null) rowUnits[rPrev2] = savedPrev2;
+        }
+      }
+    }
+    if (!improved) break;
+  }
+
   // PAVA X-alignment
   const unitWidth = (u) => u.length * cw + (u.length - 1) * COUPLE_GAP_X;
   const unitCenters = {};
@@ -2328,7 +2632,9 @@ function computeClientLayout(visible) {
   const nodesPos = {};
   const generations = [];
   const focalId = state.data.meta?.focal_person_id;
-  const focalRank = focalId && focalId in rank ? rank[focalId] : null;
+  const focalRank = (focalId && focalId in rank)
+    ? rank[focalId]
+    : (sortedRanks.length ? sortedRanks[sortedRanks.length - 1] : null);
   sortedRanks.forEach((r, rowIdx) => {
     const y = Math.round((MARGIN_Y + rowIdx * LAYER_GAP_Y) * 10) / 10;
     const label = focalRank !== null ? generationLabelClient(focalRank - r) : `Gen ${rowIdx + 1}`;
@@ -2382,7 +2688,7 @@ function computeClientLayout(visible) {
   for (const [cgStr, chList] of Object.entries(corrMap)) {
     const cg = Number(cgStr);
     const childY = Math.min(...chList.flatMap(h => h.children.filter(c => nodesPos[c].generation === cg).map(c => nodesPos[c].y)));
-    const corrTop = childY - LAYER_GAP_Y + ch / 2 + 24;
+    const corrTop = childY - LAYER_GAP_Y + ch / 2 + 44;
     const corrBot = childY - ch / 2 - 22;
     const corrMid = (corrTop + corrBot) / 2;
     const spans = chList.map(h => {
@@ -2405,11 +2711,54 @@ function computeClientLayout(visible) {
     }
   }
 
+  // Compute clear vertical gap X for multi-generation edges in client layout
+  const rowIntervals = {};
+  for (const pos of Object.values(nodesPos)) {
+    (rowIntervals[pos.generation] ||= []).push([pos.x - cw / 2 - 10, pos.x + cw / 2 + 10]);
+  }
+  const findClearRouteX = (gStart, gEnd, prefX) => {
+    if (gEnd - gStart <= 1) return null;
+    const blocked = [];
+    for (let g = gStart + 1; g < gEnd; g++) blocked.push(...(rowIntervals[g] || []));
+    if (!blocked.length) return null;
+    blocked.sort((a, b) => a[0] - b[0]);
+    const merged = [blocked[0].slice()];
+    for (let i = 1; i < blocked.length; i++) {
+      const prev = merged[merged.length - 1];
+      if (blocked[i][0] <= prev[1]) prev[1] = Math.max(prev[1], blocked[i][1]);
+      else merged.push(blocked[i].slice());
+    }
+    const cands = [merged[0][0] - 18, merged[merged.length - 1][1] + 18];
+    for (let i = 0; i < merged.length - 1; i++) {
+      if (merged[i + 1][0] - merged[i][1] >= 12) cands.push((merged[i][1] + merged[i + 1][0]) / 2);
+    }
+    let best = cands[0], bestD = Math.abs(cands[0] - prefX);
+    for (const cx of cands) {
+      const d = Math.abs(cx - prefX);
+      if (d < bestD) { bestD = d; best = cx; }
+    }
+    return Math.round(best * 10) / 10;
+  };
+
   // Filter edges to visible hubs/nodes (and respect collapsed upward edges)
   const edges = (serverLayout.edges || []).filter(e => {
     if (e.kind === "spouse_to_hub") return visible.has(e.from) && hubById.has(e.to);
     if (e.kind === "hub_to_child") return hubById.has(e.from) && visible.has(e.to) && !state.collapsedAncestors.has(e.to);
     return visible.has(e.from) && visible.has(e.to);
+  }).map(e => {
+    if (e.kind !== "hub_to_child") return e;
+    const h = hubById.get(e.from);
+    const cPos = nodesPos[e.to];
+    if (!h || !cPos || !h.parents.length) return e;
+    const parentGen = Math.max(...h.parents.map(p => nodesPos[p].generation));
+    const rx = findClearRouteX(parentGen, cPos.generation, (h.x + cPos.x) / 2);
+    if (rx === null) {
+      const copy = { ...e };
+      delete copy.route_x;
+      delete copy.bot_bus_y;
+      return copy;
+    }
+    return { ...e, route_x: rx, bot_bus_y: Math.round((cPos.y - ch / 2 - 24) * 10) / 10 };
   });
 
   return {
@@ -2451,7 +2800,7 @@ let _hoverLeaveTimer = null;
 let _hoverAlignTimer = null;
 let _rowAnimFrame = null;
 const HOVER_ALIGN_DELAY_MS = 1800;
-const _renderedRefs = { nodes: new Map(), hubs: new Map(), edges: [], visibleHubs: new Map() };
+const _renderedRefs = { nodes: new Map(), hubs: new Map(), edges: [], visibleHubs: new Map(), genLabels: [] };
 
 function getRowOffset(gen) {
   return state.rowOffsets[gen] || 0;
@@ -2472,6 +2821,28 @@ function getVisualHubPos(layout, h) {
   }
   const avgX = ps.reduce((sum, p) => sum + getVisualNodePos(layout, p).x, 0) / ps.length;
   return { x: avgX, y: h.y };
+}
+
+function roundedMultiGenPath(x1, y1, x2, y2, topBusY, routeX, botBusY) {
+  const seg1 = (ax, ay, bx, by, cy) => {
+    if (Math.abs(ax - bx) < 2) return [`L ${bx} ${by}`];
+    const r = Math.min(8, Math.abs(bx - ax) / 2, Math.abs(cy - ay) / 2, Math.abs(by - cy) / 2);
+    const dir = bx > ax ? 1 : -1;
+    if (r < 2) return [`L ${ax} ${cy}`, `L ${bx} ${cy}`, `L ${bx} ${by}`];
+    return [
+      `L ${ax} ${cy - r}`,
+      `Q ${ax} ${cy}, ${ax + dir * r} ${cy}`,
+      `L ${bx - dir * r} ${cy}`,
+      `Q ${bx} ${cy}, ${bx} ${cy + r}`,
+      `L ${bx} ${by}`,
+    ];
+  };
+  const midY = (topBusY + botBusY) / 2;
+  return [
+    `M ${x1} ${y1}`,
+    ...seg1(x1, y1, routeX, midY, topBusY),
+    ...seg1(routeX, midY, x2, y2, botBusY),
+  ].join(" ");
 }
 
 function computeEdgePath(layout, edge, visibleHubs) {
@@ -2495,6 +2866,14 @@ function computeEdgePath(layout, edge, visibleHubs) {
     const c = getVisualNodePos(layout, edge.to);
     if (!h || !c) return null;
     const hp = getVisualHubPos(layout, h);
+    if (typeof edge.route_x === "number" && typeof edge.bot_bus_y === "number") {
+      const parentGen = h.parents?.length ? Math.max(...h.parents.map(p => layout.nodes[p]?.generation ?? 0)) : 0;
+      const topBusY = typeof h.bus_y === "number" ? h.bus_y : hp.y + ch / 2 + 44;
+      const routeX = edge.route_x + getRowOffset(parentGen + 1);
+      if (topBusY > hp.y + 6 && edge.bot_bus_y > topBusY + 12 && c.y - ch / 2 > edge.bot_bus_y + 6) {
+        return roundedMultiGenPath(hp.x, hp.y, c.x, c.y - ch / 2, topBusY, routeX, edge.bot_bus_y);
+      }
+    }
     return roundedOrthogonalPath(hp.x, hp.y, c.x, c.y - ch / 2, h.bus_y);
   }
   const a = getVisualNodePos(layout, edge.from);
@@ -2882,12 +3261,15 @@ function renderGraph({ recomputeAlignments = false } = {}) {
   _renderedRefs.nodes.clear();
   _renderedRefs.hubs.clear();
   _renderedRefs.edges = [];
+  _renderedRefs.genLabels = [];
 
   const layerBands = document.getElementById("layer-bands");
+  const layerGenLabels = document.getElementById("layer-gen-labels");
   const layerEdges = document.getElementById("layer-edges");
   const layerHubs = document.getElementById("layer-hubs");
   const layerNodes = document.getElementById("layer-nodes");
   layerBands.replaceChildren();
+  if (layerGenLabels) layerGenLabels.replaceChildren();
   layerEdges.replaceChildren();
   layerHubs.replaceChildren();
   layerNodes.replaceChildren();
@@ -2895,23 +3277,28 @@ function renderGraph({ recomputeAlignments = false } = {}) {
   const cw = layout.card_w;
   const ch = layout.card_h;
 
-  // Subtle generation row guide lines & labels
+  // Subtle generation row guide lines (pan/zoom with graph) + sticky left-edge generation label pills
   for (const gMeta of (layout.generations || [])) {
     layerBands.appendChild(svgEl("line", {
       class: "gen-band-line",
-      x1: 16,
+      x1: -2000,
       y1: gMeta.y,
-      x2: Math.max(layout.width - 16, 400),
+      x2: Math.max(layout.width + 2000, 4000),
       y2: gMeta.y,
     }));
-    const lbl = svgEl("text", {
-      class: "gen-band-label",
-      x: 16,
-      y: gMeta.y - ch / 2 - 10,
-    });
-    lbl.textContent = gMeta.label;
-    layerBands.appendChild(lbl);
+    if (layerGenLabels) {
+      const pillW = Math.max(66, gMeta.label.length * 6.5 + 16);
+      const pillH = 22;
+      const gLbl = svgEl("g", { class: "gen-band-pill", "data-gen-y": String(gMeta.y) });
+      gLbl.appendChild(svgEl("rect", { x: 0, y: -pillH / 2, width: pillW, height: pillH }));
+      const lbl = svgEl("text", { class: "gen-band-label", x: 8, y: 4 });
+      lbl.textContent = gMeta.label;
+      gLbl.appendChild(lbl);
+      layerGenLabels.appendChild(gLbl);
+      _renderedRefs.genLabels.push({ y: gMeta.y, el: gLbl });
+    }
   }
+  updateStickyGenLabels();
 
   // Map hubKey -> full baseVisible children list from server layout (so collapsed hubs still know their collateral count)
   const serverHubChildren = new Map();
@@ -2981,7 +3368,7 @@ function renderGraph({ recomputeAlignments = false } = {}) {
     const hasLabel = !!(h.marriage?.date || (state.showConsang && h.consanguineous));
     if (hasLabel) {
       const lblText = (state.showConsang && h.consanguineous ? "⚠ " : "") + (h.marriage?.date ? `m. ${h.marriage.date}` : "related");
-      const lbl = svgEl("text", { class: "hub-label", y: h.inline ? ch / 2 + 13 : 20 });
+      const lbl = svgEl("text", { class: "hub-label", y: h.inline ? ch / 2 + 14 : 20 });
       lbl.textContent = lblText;
       g.appendChild(lbl);
     }
@@ -2998,7 +3385,7 @@ function renderGraph({ recomputeAlignments = false } = {}) {
       const pillText = isColCollapsed ? `+${colCount} ${noun}` : `−${colCount} ${noun}`;
       const pillW = Math.max(46, pillText.length * 6.2 + 12);
       const pillH = 17;
-      const pillY = h.inline ? (hasLabel ? ch / 2 + 19 : ch / 2 + 6) : (hasLabel ? 26 : 12);
+      const pillY = h.inline ? (hasLabel ? ch / 2 + 23 : ch / 2 + 8) : (hasLabel ? 28 : 13);
       const parentNames = h.parents.map(p => data.individuals[p]?.primary_name || p).join(" & ");
       const colG = svgEl("g", {
         class: isColCollapsed ? "collateral-toggle is-collapsed" : "collateral-toggle",
@@ -3082,18 +3469,41 @@ function renderGraph({ recomputeAlignments = false } = {}) {
 
     inner.appendChild(svgEl("rect", { class: "node-card", width: cw, height: ch }));
 
-    const nameEl = svgEl("text", { class: "node-name", x: 12, y: 26 });
-    const nameStr = ind.primary_name.length > 24 ? ind.primary_name.slice(0, 23) + "…" : ind.primary_name;
-    nameEl.textContent = nameStr;
+    // Wrap long names cleanly across up to 2 lines
+    const rawName = ind.primary_name || "";
+    const maxLine = 25;
+    let nameLines;
+    if (rawName.length <= maxLine) {
+      nameLines = [rawName];
+    } else {
+      let splitAt = rawName.lastIndexOf(" ", maxLine);
+      if (splitAt < 8) splitAt = maxLine;
+      const l1 = rawName.slice(0, splitAt).trim();
+      const rest = rawName.slice(splitAt).trim();
+      const l2 = rest.length > maxLine ? rest.slice(0, maxLine - 1) + "…" : rest;
+      nameLines = l2 ? [l1, l2] : [l1];
+    }
+    const twoLine = nameLines.length > 1;
+    const nameEl = svgEl("text", { class: "node-name", x: 12, y: twoLine ? 22 : 27 });
+    if (!twoLine) {
+      nameEl.textContent = nameLines[0];
+    } else {
+      const ts1 = svgEl("tspan", { x: 12, dy: 0 });
+      ts1.textContent = nameLines[0];
+      const ts2 = svgEl("tspan", { x: 12, dy: 14.5 });
+      ts2.textContent = nameLines[1];
+      nameEl.appendChild(ts1);
+      nameEl.appendChild(ts2);
+    }
     inner.appendChild(nameEl);
 
     const b = ind.birth?.date || "?";
     const d = ind.living ? "Living" : (ind.death?.date || "?");
-    const datesEl = svgEl("text", { class: "node-dates", x: 12, y: 45 });
+    const datesEl = svgEl("text", { class: "node-dates", x: 12, y: twoLine ? 54 : 48 });
     datesEl.textContent = `${b} – ${d} · ${ind.sex}`;
     inner.appendChild(datesEl);
 
-    const idEl = svgEl("text", { class: "node-id", x: 12, y: 65 });
+    const idEl = svgEl("text", { class: "node-id", x: 12, y: twoLine ? 73 : 70 });
     const extra = ind.inbreeding_f > 0 && state.showConsang ? ` · F=${ind.inbreeding_f.toFixed(4)}` : "";
     idEl.textContent = `${iid}${extra}`;
     inner.appendChild(idEl);
@@ -3682,8 +4092,16 @@ function renderDrawer() {
 }
 
 // Pan & Zoom controls
+function updateStickyGenLabels() {
+  for (const { y, el: gLbl } of _renderedRefs.genLabels) {
+    const screenY = Math.round((y * state.scale + state.ty) * 10) / 10;
+    gLbl.setAttribute("transform", `translate(12, ${screenY})`);
+  }
+}
+
 function applyTransform() {
   document.getElementById("viewport").setAttribute("transform", `translate(${state.tx},${state.ty}) scale(${state.scale})`);
+  updateStickyGenLabels();
 }
 
 function fitToView({ preserveAlignments = false } = {}) {
@@ -3852,13 +4270,26 @@ function exportSvg() {
   clone.setAttribute("height", String(lh));
   const vp = clone.querySelector("#viewport");
   if (vp) vp.setAttribute("transform", "translate(0,0) scale(1)");
+  for (const gLbl of clone.querySelectorAll("#layer-gen-labels .gen-band-pill")) {
+    const gy = parseFloat(gLbl.getAttribute("data-gen-y") || "0");
+    gLbl.setAttribute("transform", `translate(12, ${gy})`);
+  }
 
-  const cs = getComputedStyle(document.documentElement);
-  const v = (name, fb) => cs.getPropertyValue(name).trim() || fb;
+  // Resolve CSS custom properties (including light-dark()) to concrete rgb() colors for standalone SVG compatibility
+  const probe = document.createElement("span");
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  const v = (name, fb) => {
+    probe.style.color = "";
+    probe.style.color = `var(${name})`;
+    const resolved = getComputedStyle(probe).color;
+    return resolved && !resolved.includes("light-dark") ? resolved : fb;
+  };
   const inlineCss = `
     .gen-band-line { stroke: ${v("--border", "#ccc")}; stroke-width: 1; stroke-dasharray: 4 6; opacity: 0.45; }
-    .gen-band-label { font: 600 11px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; opacity: 0.72; }
-    .node-inner { transform-origin: 108px 41px; transform: scale(1); }
+    .gen-band-pill rect { fill: ${v("--surface", "#fff")}; stroke: ${v("--border", "#ccc")}; stroke-width: 1; rx: 6; opacity: 0.9; }
+    .gen-band-label { font: 600 11px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; }
+    .node-inner { transform-origin: 108px 44px; transform: scale(1); }
     svg.compact-collateral .node-group.non-direct .node-inner { transform: scale(0.82); }
     svg.compact-collateral .node-group.non-direct.selected .node-inner { transform: scale(1); }
     .node-card { fill: ${v("--surface", "#fff")}; stroke: ${v("--border", "#ccc")}; stroke-width: 1.6; rx: 10; }
@@ -3866,7 +4297,7 @@ function exportSvg() {
     .node-group.status-tentative .node-card { stroke: ${v("--tentative", "#b45309")}; stroke-dasharray: 5 3; }
     .node-group.in-path .node-card { stroke: ${v("--collapse", "#7c3aed")}; stroke-width: 2.8; }
     .node-group.in-tract .node-card { stroke: ${v("--confirmed", "#047857")}; stroke-width: 2.8; }
-    .node-group.dimmed { opacity: 0.22; }
+    .node-group.dimmed { opacity: 0.36; }
     .node-name { font: 700 13px system-ui, sans-serif; fill: ${v("--text", "#161d26")}; }
     .node-dates { font: 11px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; }
     .node-id { font: 9.5px monospace; fill: ${v("--muted", "#5a6678")}; }
@@ -3885,7 +4316,7 @@ function exportSvg() {
     .badge-census-ok text, .badge-census-miss text { fill: #fff; font: 700 10px system-ui, sans-serif; }
     .hub-diamond { fill: ${v("--surface", "#fff")}; stroke: ${v("--muted", "#5a6678")}; stroke-width: 1.8; }
     .hub-group.consang .hub-diamond { fill: ${v("--consang", "#be123c")}; stroke: ${v("--consang", "#be123c")}; }
-    .hub-label { font: 10px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; text-anchor: middle; }
+    .hub-label { font: 10px system-ui, sans-serif; fill: ${v("--muted", "#5a6678")}; text-anchor: middle; paint-order: stroke; stroke: ${v("--bg", "#f6f7f9")}; stroke-width: 7px; stroke-linejoin: round; }
     .hub-group.consang .hub-label { fill: ${v("--consang", "#be123c")}; font-weight: 700; }
     .edge-path { fill: none; stroke: ${v("--muted", "#5a6678")}; stroke-width: 1.7; opacity: 0.72; }
     .edge-path.proven { stroke: ${v("--confirmed", "#047857")}; opacity: 0.85; }
@@ -3894,11 +4325,13 @@ function exportSvg() {
     .edge-path.fan { stroke: ${v("--fan", "#4338ca")}; stroke-dasharray: 4 4; }
     .edge-path.consang { stroke: ${v("--consang", "#be123c")}; stroke-width: 2.2; }
     .edge-path.highlighted { stroke: ${v("--collapse", "#7c3aed")}; stroke-width: 3.2; stroke-dasharray: none; opacity: 1; }
-    .edge-path.dimmed { opacity: 0.12; }
+    .edge-path.dimmed { opacity: 0.18; }
   `;
+  const bgFill = v("--bg", "#f6f7f9");
+  probe.remove();
   const styleEl = svgEl("style");
   styleEl.textContent = inlineCss;
-  const bgRect = svgEl("rect", { width: lw, height: lh, fill: v("--bg", "#f6f7f9") });
+  const bgRect = svgEl("rect", { width: lw, height: lh, fill: bgFill });
   clone.insertBefore(bgRect, clone.firstChild);
   clone.insertBefore(styleEl, clone.firstChild);
 

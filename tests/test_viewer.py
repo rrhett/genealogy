@@ -53,6 +53,7 @@ def test_viewer_payload_and_static_export(tmp_path: Path) -> None:
     assert "compact-collateral" in html_text
     assert 'id="btn-collapse-collaterals"' in html_text
     assert "toggleHubCollaterals" in html_text
+    assert "roundedMultiGenPath" in html_text
     assert 'command: "--copy"' in html_text
     assert "STANDALONE_MODE = true" in html_text
     assert "Living (Redacted)" in html_text
@@ -164,6 +165,105 @@ def test_layout_uneven_branch_depths_and_cross_gen_inosculation(tmp_path: Path) 
     for r in rels:
         if r.type == "parent_child":
             assert nodes2[r.person_1]["generation"] < nodes2[r.person_2]["generation"]
+
+    # Multi-generation jump (if any edge skips >= 1 row) must get a clear route_x avoiding intermediate cards
+    cw = payload2["layout"]["card_w"]
+    for edge in payload2["layout"]["edges"]:
+        if edge["kind"] == "hub_to_child" and "route_x" in edge:
+            rx = edge["route_x"]
+            child_gen = nodes2[edge["to"]]["generation"]
+            parent_gen = max(nodes2[p]["generation"] for p in edge["parents"])
+            for pos in nodes2.values():
+                if parent_gen < pos["generation"] < child_gen:
+                    assert abs(rx - pos["x"]) >= cw / 2.0 + 4.0
+
+    # Even without focal_person configured, relative generation labels are computed from bottom-most row
+    ds_no_focal = Dataset(root=tmp_path, individuals=inds, sources={}, relationships=rels, config={})
+    payload3 = build_viewer_payload(ds_no_focal, redact_living=False)
+    gen_labels = [g["label"] for g in payload3["layout"]["generations"]]
+    assert "Focal / Self" in gen_labels
+    assert "Parents (+1)" in gen_labels
+
+
+def test_layout_coupled_inversion_zero_crossings(tmp_path: Path) -> None:
+    """Coupled 2-layer inversion (4 couples -> 2 couples -> 1 couple) must untangle to 0 crossings."""
+    from genealogy.loader import Dataset, LoadedIndividual
+    from genealogy.schema import IndividualFrontmatter, Relationship
+
+    def _ind(iid: str, name: str, sex: str = "U") -> LoadedIndividual:
+        return LoadedIndividual(
+            path=tmp_path / f"{iid}.md",
+            data=IndividualFrontmatter(id=iid, primary_name=name, sex=sex),
+            body="",
+        )
+
+    # Gen 0: Left-branch parents (1750) vs Right-branch parents (1760)
+    # Gen 1: 4 couples — Left-branch son (L1, L2) -> Child B; Right-branch son (R1, R2) -> Child A;
+    #        plus two unconstrained leaf in-law couples (IL1/IL2 -> SpouseA, IR1/IR2 -> SpouseB)
+    # Gen 2: Couple A [SpouseA (F), ChildA (M)] and Couple B [ChildB (M), SpouseB (F)]
+    # Gen 3: Consanguineous couple [SonOfA (M), DaughterOfB (F)] -> Grandchild
+    inds = {
+        "I-ANC-LEFT-1750": _ind("I-ANC-LEFT-1750", "Anc Left", "M"),
+        "I-ANC-RIGHT-1760": _ind("I-ANC-RIGHT-1760", "Anc Right", "M"),
+        "I-PAR-LB-1780": _ind("I-PAR-LB-1780", "Par LB", "M"),
+        "I-PAR-LBW-1782": _ind("I-PAR-LBW-1782", "Par LBW", "F"),
+        "I-PAR-IL-1785": _ind("I-PAR-IL-1785", "Par IL", "M"),
+        "I-PAR-ILW-1787": _ind("I-PAR-ILW-1787", "Par ILW", "F"),
+        "I-PAR-RA-1790": _ind("I-PAR-RA-1790", "Par RA", "M"),
+        "I-PAR-RAW-1792": _ind("I-PAR-RAW-1792", "Par RAW", "F"),
+        "I-PAR-IR-1795": _ind("I-PAR-IR-1795", "Par IR", "M"),
+        "I-PAR-IRW-1797": _ind("I-PAR-IRW-1797", "Par IRW", "F"),
+        "I-GEN2-A-1820": _ind("I-GEN2-A-1820", "Andres", "M"),
+        "I-GEN2-AW-1822": _ind("I-GEN2-AW-1822", "Juliana", "F"),
+        "I-GEN2-B-1825": _ind("I-GEN2-B-1825", "Rafael", "M"),
+        "I-GEN2-BW-1827": _ind("I-GEN2-BW-1827", "Francisca", "F"),
+        "I-GEN3-M-1850": _ind("I-GEN3-M-1850", "Mariano", "M"),
+        "I-GEN3-F-1852": _ind("I-GEN3-F-1852", "Juana", "F"),
+        "I-GEN4-KID-1880": _ind("I-GEN4-KID-1880", "Child", "M"),
+    }
+    rels = [
+        Relationship(type="parent_child", person_1="I-ANC-LEFT-1750", person_2="I-PAR-LB-1780"),
+        Relationship(type="parent_child", person_1="I-ANC-RIGHT-1760", person_2="I-PAR-RA-1790"),
+        Relationship(type="marriage", person_1="I-PAR-LB-1780", person_2="I-PAR-LBW-1782"),
+        Relationship(type="marriage", person_1="I-PAR-IL-1785", person_2="I-PAR-ILW-1787"),
+        Relationship(type="marriage", person_1="I-PAR-RA-1790", person_2="I-PAR-RAW-1792"),
+        Relationship(type="marriage", person_1="I-PAR-IR-1795", person_2="I-PAR-IRW-1797"),
+        Relationship(type="parent_child", person_1="I-PAR-LB-1780", person_2="I-GEN2-B-1825"),
+        Relationship(type="parent_child", person_1="I-PAR-LBW-1782", person_2="I-GEN2-B-1825"),
+        Relationship(type="parent_child", person_1="I-PAR-IL-1785", person_2="I-GEN2-AW-1822"),
+        Relationship(type="parent_child", person_1="I-PAR-ILW-1787", person_2="I-GEN2-AW-1822"),
+        Relationship(type="parent_child", person_1="I-PAR-RA-1790", person_2="I-GEN2-A-1820"),
+        Relationship(type="parent_child", person_1="I-PAR-RAW-1792", person_2="I-GEN2-A-1820"),
+        Relationship(type="parent_child", person_1="I-PAR-IR-1795", person_2="I-GEN2-BW-1827"),
+        Relationship(type="parent_child", person_1="I-PAR-IRW-1797", person_2="I-GEN2-BW-1827"),
+        Relationship(type="marriage", person_1="I-GEN2-A-1820", person_2="I-GEN2-AW-1822"),
+        Relationship(type="marriage", person_1="I-GEN2-B-1825", person_2="I-GEN2-BW-1827"),
+        Relationship(type="parent_child", person_1="I-GEN2-A-1820", person_2="I-GEN3-M-1850"),
+        Relationship(type="parent_child", person_1="I-GEN2-AW-1822", person_2="I-GEN3-M-1850"),
+        Relationship(type="parent_child", person_1="I-GEN2-B-1825", person_2="I-GEN3-F-1852"),
+        Relationship(type="parent_child", person_1="I-GEN2-BW-1827", person_2="I-GEN3-F-1852"),
+        Relationship(type="marriage", person_1="I-GEN3-M-1850", person_2="I-GEN3-F-1852"),
+        Relationship(type="parent_child", person_1="I-GEN3-M-1850", person_2="I-GEN4-KID-1880"),
+        Relationship(type="parent_child", person_1="I-GEN3-F-1852", person_2="I-GEN4-KID-1880"),
+    ]
+    ds = Dataset(root=tmp_path, individuals=inds, sources={}, relationships=rels, config={"focal_person": "I-GEN4-KID-1880"})
+    payload = build_viewer_payload(ds, redact_living=False)
+    nodes = payload["layout"]["nodes"]
+
+    # Check exact edge crossings between every consecutive pair of generations using hub X -> child X
+    hubs_by_id = {h["id"]: h for h in payload["layout"]["hubs"]}
+    edges_by_gen: dict[int, list[tuple[float, float]]] = {}
+    for e in payload["layout"]["edges"]:
+        if e["kind"] == "hub_to_child":
+            h = hubs_by_id[e["from"]]
+            c = nodes[e["to"]]
+            edges_by_gen.setdefault(c["generation"], []).append((h["x"], c["x"]))
+    for gen, segs in edges_by_gen.items():
+        for i in range(len(segs)):
+            for j in range(i + 1, len(segs)):
+                x1, y1 = segs[i]
+                x2, y2 = segs[j]
+                assert (x1 - x2) * (y1 - y2) >= 0, f"Crossing detected entering gen {gen}: {segs[i]} vs {segs[j]}"
 
 
 def test_viewer_http_server_endpoints_and_traversal_guard() -> None:
