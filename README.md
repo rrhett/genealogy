@@ -282,6 +282,43 @@ Unlike a web chat where the conversation thread *is* your memory, here **your Gi
 
 ---
 
+## Workspace Configuration (`.genealogy.yaml`)
+
+`genealogy init` creates an optional, user-editable `.genealogy.yaml` file at the root of your family-history repository (note the leading dot). It stores workspace settings, acts as a marker for `genealogy upgrade` and the read-only boundary hook, and is committed to your private Git repo.
+
+```yaml
+# Toolkit-managed metadata (updated by `genealogy upgrade-workspace`)
+toolkit_version: 0.9.0
+agent_mode: embedded        # "embedded" (default) or "plugin"
+
+# Optional user-editable settings
+focal_person: I-WEST-THOMAS-1895
+regions:
+  - auto                    # auto | us | mexico | uk | canada | general
+artifacts_dir: ~/Dropbox/FamilyScans
+screenshots_dir: ~/Pictures/Screenshots
+downloads_dir: ~/Downloads
+```
+
+### Supported Keys
+
+| Key | Type | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `focal_person` | `str` (Individual ID) | unset | Default focal person ("you" / root of perspective) for generation labels, direct-ancestor detection, and the Places panel in `genealogy view`, and as the default `--focal` person in `genealogy places`. |
+| `regions` | `list[str]` or `str` | `["auto"]` | Regional record/census profiles for `genealogy gaps` and viewer census badges (`auto`, `us`, `mexico`, `uk`, `canada`, `general`). `auto` infers regions per individual from places and jurisdictions; explicit values override auto-detection (still overridable per command via `--regions`). |
+| `artifacts_dir` | `str` (path) | `./artifacts` | External folder for raw scans outside Git (`~` and relative paths supported) while `data/sources/` keeps portable `artifacts/...` paths. Respected by `intake`, `validate`, `view`, and the read-only boundary hook. Overridden by `GENEALOGY_ARTIFACTS_DIR`. |
+| `screenshots_dir` | `str` (path) | OS defaults | Folder searched by `genealogy intake --grab-screenshot` / `--recent`. Overridden by `--from` or `GENEALOGY_SCREENSHOTS_DIR`. |
+| `downloads_dir` | `str` (path) | OS defaults | Folder searched by `genealogy intake --grab-download` / `--recent`. Overridden by `--from` or `GENEALOGY_DOWNLOADS_DIR`. |
+| `toolkit_version` | `str` | current version | *(Toolkit-managed)* Tracks the last synced toolkit version so `genealogy upgrade-workspace` knows when to refresh managed files and surface version-specific data-audit prompts. |
+| `agent_mode` | `"embedded"` \| `"plugin"` | `"embedded"` | *(Toolkit-managed)* Controls whether `upgrade-workspace` syncs `AGENTS.md` and `.agents/` into the repo (`embedded`) or defers to a standalone Antigravity plugin (`plugin`). |
+
+**Editing & upgrade behavior:**
+* You can edit `.genealogy.yaml` directly at any time—`genealogy upgrade-workspace` preserves all user-set keys and values, updating only `toolkit_version` and `agent_mode`.
+* Because `upgrade-workspace` rewrites the file via `yaml.safe_dump` when those two fields change, **custom inline YAML comments are not preserved** across upgrades.
+* Keep `artifacts_dir` on a single line so the lightweight `guard_boundaries.py` hook can parse it without extra dependencies.
+
+---
+
 ## Bundled Domain Skills & Automated Guardrails (`plugin/`)
 
 * **4 Workflow Slash Commands (`plugin/skills/`):**
