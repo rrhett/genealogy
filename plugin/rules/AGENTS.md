@@ -237,9 +237,5 @@ Top-level YAML keys are strictly validated (`genealogy validate` rejects unknown
    - `genealogy import-gedcom <file>` / `genealogy export-gedcom <out>` — GEDCOM 5.5.1 / 7.0 pipelines.
    - `genealogy search newspapers|nara|wikitree ...` — Query open archival APIs (always treat WikiTree results as secondary leads).
    - `genealogy upgrade-workspace` — Refresh managed `AGENTS.md`, skills, and hooks after running `uv tool upgrade genealogy-workspace`.
-6. **Session & Context Hygiene (Gentle Nudge):** Everything you prove or note is persisted in `data/` and `workspace/`, so long single-chat threads are unnecessary and degrade accuracy/quota. Do not nag on short chats (1–2 `/ingest` calls or a single focused topic), but **do** add a brief, friendly one-line tip suggesting `/wrap-up` + a **new chat** (starting with `/status`) when:
-   - **3+ `/ingest` calls** (or ~15+ turns) have accumulated in the current chat, or earlier turns were compacted;
-   - The user switches to an unrelated family branch after finishing work on another; or
-   - Completing `/wrap-up`.
 
    > **Sandbox note:** If `genealogy` is not found in the terminal sandbox (for example, `uv tool install` placed it in `~/.local/bin`, which is outside the sandbox), run `genealogy` commands outside the sandbox (`BypassSandbox: true`) or ask the user to grant read-only access to `~/.local/bin/genealogy` and its `uv` tool/Python directories in Project-Level Settings.
